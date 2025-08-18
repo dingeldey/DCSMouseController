@@ -9,11 +9,11 @@
 # - Choose target monitor; fractions (preferred) or pixels within that monitor
 # - Toggle ON/OFF; ON recenters to INI base each time; OFF does not restore cursor (configurable)
 # - Continuous hold-based adjust for X/Y at pixels/second velocity
-# - Optional axis-based movement for X/Y with deadzone, invert, and velocity scaling
-# - Reapply cursor every repeat_ms while active; optional 1px wiggle
-# - Debug prints for button edges with correct device index mapping
-# - Clamp target to selected monitor or full virtual desktop (configurable)
+# - Axis-based movement for X/Y with per-axis deadzone and invert, and velocity scaling
 # - Map joystick buttons to left/right mouse clicks (from INI)
+# - Map two joystick buttons to mouse wheel scrolling (hold to scroll at a set rate)
+# - Reapply cursor every repeat_ms while active; optional 1px wiggle
+# - Clamp target to selected monitor or full virtual desktop (configurable)
 #
 # Notes:
 # - INI *button* indices are 1-based (Windows-style) and converted to 0-based for pygame.
@@ -94,7 +94,7 @@ def get_cursor_pos_virtual():
     pt = POINT(); ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
     return int(pt.x), int(pt.y)
 
-# SendInput absolute move (virtual desktop)
+# SendInput structures
 class _MOUSEINPUT(ctypes.Structure):
     _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long),
                 ("mouseData", ctypes.c_uint), ("dwFlags", ctypes.c_uint),
@@ -110,6 +110,8 @@ MOUSEEVENTF_LEFTDOWN  = 0x0002
 MOUSEEVENTF_LEFTUP    = 0x0004
 MOUSEEVENTF_RIGHTDOWN = 0x0008
 MOUSEEVENTF_RIGHTUP   = 0x0010
+MOUSEEVENTF_WHEEL     = 0x0800
+WHEEL_DELTA = 120
 
 def sendinput_move_absolute_virtual(x_px, y_px):
     vx, vy, vw, vh = win_virtual_desktop_rect()
@@ -121,10 +123,7 @@ def sendinput_move_absolute_virtual(x_px, y_px):
     ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
 
 def send_mouse_button(button: str, down: bool, *, use_sendinput: bool):
-    """
-    Send a mouse button press/release.
-    button: 'left' or 'right'; down=True for press, False for release.
-    """
+    """Send a mouse button press/release. button: 'left' or 'right'."""
     btn = button.lower()
     if platform.system().lower() == "windows" and use_sendinput:
         if btn == "left":
@@ -139,10 +138,24 @@ def send_mouse_button(button: str, down: bool, *, use_sendinput: bool):
         ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
     else:
         try:
-            if down:
-                pyautogui.mouseDown(button=btn)
-            else:
-                pyautogui.mouseUp(button=btn)
+            if down: pyautogui.mouseDown(button=btn)
+            else:    pyautogui.mouseUp(button=btn)
+        except Exception:
+            pass
+
+def send_mouse_wheel(ticks: int, *, use_sendinput: bool):
+    """Scroll by 'ticks' notches. Positive = scroll up, Negative = scroll down."""
+    if ticks == 0:
+        return
+    if platform.system().lower() == "windows" and use_sendinput:
+        delta = int(ticks) * WHEEL_DELTA
+        inp = _INPUT()
+        inp.type = 0
+        inp.mi = _MOUSEINPUT(0, 0, delta, MOUSEEVENTF_WHEEL, 0, None)
+        ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
+    else:
+        try:
+            pyautogui.scroll(int(ticks))
         except Exception:
             pass
 # =======================================================
@@ -239,6 +252,8 @@ def load_config(path: str):
     decy_spec = sec.get("button_dec_y", "").strip()
     mouse_left_spec  = sec.get("button_mouse_left",  "").strip()
     mouse_right_spec = sec.get("button_mouse_right", "").strip()
+    wheel_up_spec    = sec.get("button_wheel_up", "").strip()
+    wheel_down_spec  = sec.get("button_wheel_down", "").strip()
 
     button_toggle_1b, toggle_req_mod = parse_button_spec(button_toggle_spec)
     button_off_1b,    off_req_mod    = parse_button_spec(button_off_spec)
@@ -248,6 +263,8 @@ def load_config(path: str):
     decy_1b,          decy_req_mod   = parse_button_spec(decy_spec)
     mouse_left_1b,    mouse_left_req_mod  = parse_button_spec(mouse_left_spec)
     mouse_right_1b,   mouse_right_req_mod = parse_button_spec(mouse_right_spec)
+    wheel_up_1b,      wheel_up_req_mod    = parse_button_spec(wheel_up_spec)
+    wheel_down_1b,    wheel_down_req_mod  = parse_button_spec(wheel_down_spec)
 
     # Axes (0-based indices; optional 'M')
     axis_x_spec = sec.get("axis_x", "").strip()  # e.g., "0" or "0M"
@@ -256,10 +273,17 @@ def load_config(path: str):
     axis_y_raw, axis_y_req_mod = parse_button_spec(axis_y_spec)
     axis_x = axis_x_raw  # already 0-based in INI
     axis_y = axis_y_raw
-    axis_deadzone = sec.getfloat("axis_deadzone", fallback=0.15)  # 0..1
-    axis_velocity = sec.getint("axis_velocity_px_s", fallback=800)
+
+    # Per-axis deadzones and invert
+    # Keep global 'axis_deadzone' for backward-compat, but prefer per-axis if provided.
+    axis_deadzone_global = sec.getfloat("axis_deadzone", fallback=0.15)
+    adx = f_or_none("axis_deadzone_x"); ady = f_or_none("axis_deadzone_y")
+    axis_deadzone_x = float(adx if adx is not None else axis_deadzone_global)
+    axis_deadzone_y = float(ady if ady is not None else axis_deadzone_global)
     axis_invert_x = getbool("axis_invert_x", False)
     axis_invert_y = getbool("axis_invert_y", False)
+
+    axis_velocity = sec.getint("axis_velocity_px_s", fallback=800)
 
     # Convert 1-based *buttons* to 0-based for pygame
     button_toggle = one_based_to_zero(button_toggle_1b)
@@ -270,6 +294,8 @@ def load_config(path: str):
     decy          = one_based_to_zero(decy_1b)
     mouse_left_btn  = one_based_to_zero(mouse_left_1b)
     mouse_right_btn = one_based_to_zero(mouse_right_1b)
+    wheel_up_btn    = one_based_to_zero(wheel_up_1b)
+    wheel_down_btn  = one_based_to_zero(wheel_down_1b)
 
     if button_toggle is None:
         print("[ERROR] 'button_toggle' (or legacy 'button') is required."); sys.exit(1)
@@ -295,6 +321,8 @@ def load_config(path: str):
 
     restore_on_off = getbool("restore_on_off", False)  # default: do NOT restore
 
+    wheel_rate = sec.getint("wheel_ticks_per_second", fallback=30)
+
     return {
         "device_guid": device_guid, "device_index": device_index,
         "mod_guid": mod_guid, "mod_index": mod_index, "modifier_button": modifier_button,
@@ -319,10 +347,15 @@ def load_config(path: str):
         # mouse buttons
         "mouse_left_btn": mouse_left_btn, "mouse_left_req_mod": mouse_left_req_mod,
         "mouse_right_btn": mouse_right_btn, "mouse_right_req_mod": mouse_right_req_mod,
+        # wheel buttons & rate
+        "wheel_up_btn": wheel_up_btn, "wheel_up_req_mod": wheel_up_req_mod,
+        "wheel_down_btn": wheel_down_btn, "wheel_down_req_mod": wheel_down_req_mod,
+        "wheel_rate": int(wheel_rate),
         # axes
         "axis_x": axis_x, "axis_x_req_mod": axis_x_req_mod,
         "axis_y": axis_y, "axis_y_req_mod": axis_y_req_mod,
-        "axis_deadzone": float(axis_deadzone),
+        "axis_deadzone_x": float(axis_deadzone_x),
+        "axis_deadzone_y": float(axis_deadzone_y),
         "axis_velocity": int(axis_velocity),
         "axis_invert_x": axis_invert_x,
         "axis_invert_y": axis_invert_y,
@@ -433,6 +466,8 @@ def main():
     # Hold status
     hold_inc_x = hold_dec_x = hold_inc_y = hold_dec_y = False
     mouse_hold = {"left": False, "right": False}
+    hold_wheel_up = hold_wheel_down = False
+    wheel_accum = 0.0  # accumulate fractional ticks across frames
 
     def modifier_is_down():
         if cfg["modifier_button"] is None: return False
@@ -451,7 +486,6 @@ def main():
     def toggle_on():
         nonlocal active, saved_cursor, last_apply, wiggle_flip, target_x, target_y
         if active: return
-        # capture cursor for optional restore
         if platform.system().lower() == "windows":
             saved_cursor = get_cursor_pos_virtual()
         else:
@@ -515,6 +549,22 @@ def main():
                                 print("[MOUSE] RIGHT DOWN")
                             continue
 
+                    # Wheel UP start
+                    if cfg.get("wheel_up_btn") is not None and b == cfg["wheel_up_btn"]:
+                        if (not cfg["wheel_up_req_mod"]) or modifier_is_down():
+                            hold_wheel_up = True
+                            if cfg["toggle_feedback"]:
+                                print("[WHEEL] UP HOLD")
+                            continue
+
+                    # Wheel DOWN start
+                    if cfg.get("wheel_down_btn") is not None and b == cfg["wheel_down_btn"]:
+                        if (not cfg["wheel_down_req_mod"]) or modifier_is_down():
+                            hold_wheel_down = True
+                            if cfg["toggle_feedback"]:
+                                print("[WHEEL] DOWN HOLD")
+                            continue
+
                     # Toggle (with optional modifier requirement)
                     if b == cfg["button_toggle"] and (not cfg["toggle_req_mod"] or modifier_is_down()):
                         if now - last_toggle >= debounce_s:
@@ -551,6 +601,17 @@ def main():
                             if cfg["toggle_feedback"]:
                                 print("[MOUSE] RIGHT UP")
 
+                    # Wheel UP end
+                    if cfg.get("wheel_up_btn") is not None and b == cfg["wheel_up_btn"]:
+                        hold_wheel_up = False
+                        if cfg["toggle_feedback"]:
+                            print("[WHEEL] UP RELEASE")
+                    # Wheel DOWN end
+                    if cfg.get("wheel_down_btn") is not None and b == cfg["wheel_down_btn"]:
+                        hold_wheel_down = False
+                        if cfg["toggle_feedback"]:
+                            print("[WHEEL] DOWN RELEASE")
+
                     if cfg["incx"] is not None and b == cfg["incx"]: hold_inc_x = False
                     if cfg["decx"] is not None and b == cfg["decx"]: hold_dec_x = False
                     if cfg["incy"] is not None and b == cfg["incy"]: hold_inc_y = False
@@ -577,7 +638,7 @@ def main():
                 try:
                     ax = float(js.get_axis(cfg["axis_x"]))
                     if cfg["axis_invert_x"]: ax = -ax
-                    if abs(ax) < cfg["axis_deadzone"] or (cfg["axis_x_req_mod"] and not modifier_is_down()):
+                    if abs(ax) < cfg["axis_deadzone_x"] or (cfg["axis_x_req_mod"] and not modifier_is_down()):
                         ax = 0.0
                     step_x_axis = int(round(ax * cfg["axis_velocity"] * dt))
                 except Exception:
@@ -587,7 +648,7 @@ def main():
                 try:
                     ay = float(js.get_axis(cfg["axis_y"]))
                     if cfg["axis_invert_y"]: ay = -ay
-                    if abs(ay) < cfg["axis_deadzone"] or (cfg["axis_y_req_mod"] and not modifier_is_down()):
+                    if abs(ay) < cfg["axis_deadzone_y"] or (cfg["axis_y_req_mod"] and not modifier_is_down()):
                         ay = 0.0
                     step_y_axis = int(round(ay * cfg["axis_velocity"] * dt))
                 except Exception:
@@ -602,6 +663,18 @@ def main():
                 target_x, target_y = clamp_target(target_x, target_y, mon, cfg["clamp_virtual"])
                 if active:
                     apply_cursor(); last_apply = now; wiggle_flip = not wiggle_flip
+
+            # --- WHEEL: continuous scrolling while held ---
+            net_rate = 0.0
+            if hold_wheel_up  and ((not cfg["wheel_up_req_mod"])   or modifier_is_down()):   net_rate += cfg["wheel_rate"]
+            if hold_wheel_down and ((not cfg["wheel_down_req_mod"]) or modifier_is_down()):  net_rate -= cfg["wheel_rate"]
+
+            if net_rate != 0.0:
+                wheel_accum += net_rate * dt
+                ticks = int(wheel_accum)  # trunc toward 0
+                if ticks != 0:
+                    send_mouse_wheel(ticks, use_sendinput=cfg["use_sendinput"])
+                    wheel_accum -= ticks  # keep remainder
 
             # Periodic re-apply while ACTIVE (keeps cursor pinned when not moving)
             if active and (now - last_apply) >= repeat_interval:
