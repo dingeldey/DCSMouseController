@@ -9,12 +9,15 @@
 # - Choose target monitor; fractions (preferred) or pixels within that monitor
 # - Toggle ON/OFF; ON recenters to INI base each time; OFF does not restore cursor (configurable)
 # - Continuous hold-based adjust for X/Y at pixels/second velocity
+# - Optional axis-based movement for X/Y with deadzone, invert, and velocity scaling
 # - Reapply cursor every repeat_ms while active; optional 1px wiggle
 # - Debug prints for button edges with correct device index mapping
 # - Clamp target to selected monitor or full virtual desktop (configurable)
 # - Map joystick buttons to left/right mouse clicks (from INI)
 #
-# NOTE: INI button indices are 1-based (Windows-style). They are converted to 0-based for pygame.
+# Notes:
+# - INI *button* indices are 1-based (Windows-style) and converted to 0-based for pygame.
+# - INI *axis* indices are 0-based, matching what this script prints at startup.
 #
 # Requires: pygame, pyautogui
 #   pip install pygame pyautogui
@@ -195,7 +198,7 @@ def parse_button_spec(s: str | None):
     if num == "": return None, req_mod
     try: return int(num), req_mod
     except ValueError:
-        print(f"[ERROR] Invalid button spec '{s}'. Use e.g. '25' or '25M'."); sys.exit(1)
+        print(f"[ERROR] Invalid button/axis spec '{s}'. Use e.g. '25' or '25M'."); sys.exit(1)
 
 def load_config(path: str):
     if not Path(path).exists():
@@ -227,6 +230,7 @@ def load_config(path: str):
     modifier_button_1b = getint_or_none("modifier_button")
     modifier_button = one_based_to_zero(modifier_button_1b)
 
+    # Buttons
     button_toggle_spec = sec.get("button_toggle", fallback=sec.get("button", fallback="")).strip()
     button_off_spec    = sec.get("button_off", "").strip()
     incx_spec = sec.get("button_inc_x", "").strip()
@@ -245,7 +249,19 @@ def load_config(path: str):
     mouse_left_1b,    mouse_left_req_mod  = parse_button_spec(mouse_left_spec)
     mouse_right_1b,   mouse_right_req_mod = parse_button_spec(mouse_right_spec)
 
-    # Convert 1-based indices to 0-based for pygame
+    # Axes (0-based indices; optional 'M')
+    axis_x_spec = sec.get("axis_x", "").strip()  # e.g., "0" or "0M"
+    axis_y_spec = sec.get("axis_y", "").strip()
+    axis_x_raw, axis_x_req_mod = parse_button_spec(axis_x_spec)
+    axis_y_raw, axis_y_req_mod = parse_button_spec(axis_y_spec)
+    axis_x = axis_x_raw  # already 0-based in INI
+    axis_y = axis_y_raw
+    axis_deadzone = sec.getfloat("axis_deadzone", fallback=0.15)  # 0..1
+    axis_velocity = sec.getint("axis_velocity_px_s", fallback=800)
+    axis_invert_x = getbool("axis_invert_x", False)
+    axis_invert_y = getbool("axis_invert_y", False)
+
+    # Convert 1-based *buttons* to 0-based for pygame
     button_toggle = one_based_to_zero(button_toggle_1b)
     button_off    = one_based_to_zero(button_off_1b)
     incx          = one_based_to_zero(incx_1b)
@@ -303,6 +319,13 @@ def load_config(path: str):
         # mouse buttons
         "mouse_left_btn": mouse_left_btn, "mouse_left_req_mod": mouse_left_req_mod,
         "mouse_right_btn": mouse_right_btn, "mouse_right_req_mod": mouse_right_req_mod,
+        # axes
+        "axis_x": axis_x, "axis_x_req_mod": axis_x_req_mod,
+        "axis_y": axis_y, "axis_y_req_mod": axis_y_req_mod,
+        "axis_deadzone": float(axis_deadzone),
+        "axis_velocity": int(axis_velocity),
+        "axis_invert_x": axis_invert_x,
+        "axis_invert_y": axis_invert_y,
     }
 
 def open_device_by_guid_or_index(guid: str, idx: int | None):
@@ -537,20 +560,48 @@ def main():
                     if hasattr(event, "instance_id") and event.instance_id == instance_id:
                         print("[WARN] Primary device removed. Exiting."); return
 
-            # Apply continuous hold movement (respect 'M' requirements each tick)
+            # --- BUTTON-BASED MOVEMENT (discrete -1/0/1) ---
             vx = (1 if (hold_inc_x and (not cfg["incx_req_mod"] or modifier_is_down())) else 0) \
                  - (1 if (hold_dec_x and (not cfg["decx_req_mod"] or modifier_is_down())) else 0)
             vy = (1 if (hold_inc_y and (not cfg["incy_req_mod"] or modifier_is_down())) else 0) \
                  - (1 if (hold_decy := hold_dec_y) and (not cfg["decy_req_mod"] or modifier_is_down()) else 0)
 
-            if vx != 0 or vy != 0:
-                step_x = int(round(vx * cfg["nudge_velocity"] * dt))
-                step_y = int(round(vy * cfg["nudge_velocity"] * dt))
-                if step_x != 0 or step_y != 0:
-                    target_x += step_x; target_y += step_y
-                    target_x, target_y = clamp_target(target_x, target_y, mon, cfg["clamp_virtual"])
-                    if active:
-                        apply_cursor(); last_apply = now; wiggle_flip = not wiggle_flip
+            step_x_btn = int(round(vx * cfg["nudge_velocity"] * dt))
+            step_y_btn = int(round(vy * cfg["nudge_velocity"] * dt))
+
+            # --- AXIS-BASED MOVEMENT (analog) ---
+            step_x_axis = 0
+            step_y_axis = 0
+
+            if cfg.get("axis_x") is not None:
+                try:
+                    ax = float(js.get_axis(cfg["axis_x"]))
+                    if cfg["axis_invert_x"]: ax = -ax
+                    if abs(ax) < cfg["axis_deadzone"] or (cfg["axis_x_req_mod"] and not modifier_is_down()):
+                        ax = 0.0
+                    step_x_axis = int(round(ax * cfg["axis_velocity"] * dt))
+                except Exception:
+                    pass
+
+            if cfg.get("axis_y") is not None:
+                try:
+                    ay = float(js.get_axis(cfg["axis_y"]))
+                    if cfg["axis_invert_y"]: ay = -ay
+                    if abs(ay) < cfg["axis_deadzone"] or (cfg["axis_y_req_mod"] and not modifier_is_down()):
+                        ay = 0.0
+                    step_y_axis = int(round(ay * cfg["axis_velocity"] * dt))
+                except Exception:
+                    pass
+
+            # --- APPLY TOTAL MOVEMENT ---
+            step_x = step_x_btn + step_x_axis
+            step_y = step_y_btn + step_y_axis
+
+            if step_x != 0 or step_y != 0:
+                target_x += step_x; target_y += step_y
+                target_x, target_y = clamp_target(target_x, target_y, mon, cfg["clamp_virtual"])
+                if active:
+                    apply_cursor(); last_apply = now; wiggle_flip = not wiggle_flip
 
             # Periodic re-apply while ACTIVE (keeps cursor pinned when not moving)
             if active and (now - last_apply) >= repeat_interval:
