@@ -3,7 +3,7 @@
 # Single-thread, Windows-friendly (SendInput), pygame-based
 #
 # Features
-# - Lists all game controllers (index, GUID, buttons)
+# - Lists all game controllers (index, GUID, buttons) and shows available axes/hats
 # - GUID-first, index-second device selection
 # - Optional modifier button (same or second device); mark actions with 'M' (e.g., "25M")
 # - Choose target monitor; fractions (preferred) or pixels within that monitor
@@ -12,6 +12,9 @@
 # - Reapply cursor every repeat_ms while active; optional 1px wiggle
 # - Debug prints for button edges with correct device index mapping
 # - Clamp target to selected monitor or full virtual desktop (configurable)
+# - Map joystick buttons to left/right mouse clicks (from INI)
+#
+# NOTE: INI button indices are 1-based (Windows-style). They are converted to 0-based for pygame.
 #
 # Requires: pygame, pyautogui
 #   pip install pygame pyautogui
@@ -100,6 +103,10 @@ class _INPUT(ctypes.Structure):
 MOUSEEVENTF_MOVE = 0x0001
 MOUSEEVENTF_ABSOLUTE = 0x8000
 MOUSEEVENTF_VIRTUALDESK = 0x4000
+MOUSEEVENTF_LEFTDOWN  = 0x0002
+MOUSEEVENTF_LEFTUP    = 0x0004
+MOUSEEVENTF_RIGHTDOWN = 0x0008
+MOUSEEVENTF_RIGHTUP   = 0x0010
 
 def sendinput_move_absolute_virtual(x_px, y_px):
     vx, vy, vw, vh = win_virtual_desktop_rect()
@@ -109,6 +116,32 @@ def sendinput_move_absolute_virtual(x_px, y_px):
     inp.type = 0
     inp.mi = _MOUSEINPUT(nx, ny, 0, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, 0, None)
     ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
+
+def send_mouse_button(button: str, down: bool, *, use_sendinput: bool):
+    """
+    Send a mouse button press/release.
+    button: 'left' or 'right'; down=True for press, False for release.
+    """
+    btn = button.lower()
+    if platform.system().lower() == "windows" and use_sendinput:
+        if btn == "left":
+            flags = MOUSEEVENTF_LEFTDOWN if down else MOUSEEVENTF_LEFTUP
+        elif btn == "right":
+            flags = MOUSEEVENTF_RIGHTDOWN if down else MOUSEEVENTF_RIGHTUP
+        else:
+            return
+        inp = _INPUT()
+        inp.type = 0
+        inp.mi = _MOUSEINPUT(0, 0, 0, flags, 0, None)
+        ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
+    else:
+        try:
+            if down:
+                pyautogui.mouseDown(button=btn)
+            else:
+                pyautogui.mouseUp(button=btn)
+        except Exception:
+            pass
 # =======================================================
 
 def init_pygame():
@@ -131,9 +164,13 @@ def list_devices():
         name = js.get_name()
         guid = js.get_guid() if hasattr(js, "get_guid") else "N/A"
         buttons = js.get_numbuttons()
+        axes = js.get_numaxes() if hasattr(js, "get_numaxes") else 0
+        hats = js.get_numhats() if hasattr(js, "get_numhats") else 0
         try: instance_id = js.get_instance_id()
         except AttributeError: instance_id = js.get_id()
-        print(f"  Index={i:2d} | Buttons={buttons:3d} | GUID={guid} | Name='{name}'")
+        print(f"  Index={i:2d} | Buttons={buttons:3d} | Axes={axes:2d} | Hats={hats:2d} | GUID={guid} | Name='{name}'")
+        if axes > 0:
+            print(f"    -> Axis indices: 0 .. {axes-1}")
         devices.append((i, name, guid, buttons, instance_id))
         inst_to_idx[instance_id] = i
     return devices, inst_to_idx
@@ -196,6 +233,8 @@ def load_config(path: str):
     decx_spec = sec.get("button_dec_x", "").strip()
     incy_spec = sec.get("button_inc_y", "").strip()
     decy_spec = sec.get("button_dec_y", "").strip()
+    mouse_left_spec  = sec.get("button_mouse_left",  "").strip()
+    mouse_right_spec = sec.get("button_mouse_right", "").strip()
 
     button_toggle_1b, toggle_req_mod = parse_button_spec(button_toggle_spec)
     button_off_1b,    off_req_mod    = parse_button_spec(button_off_spec)
@@ -203,6 +242,8 @@ def load_config(path: str):
     decx_1b,          decx_req_mod   = parse_button_spec(decx_spec)
     incy_1b,          incy_req_mod   = parse_button_spec(incy_spec)
     decy_1b,          decy_req_mod   = parse_button_spec(decy_spec)
+    mouse_left_1b,    mouse_left_req_mod  = parse_button_spec(mouse_left_spec)
+    mouse_right_1b,   mouse_right_req_mod = parse_button_spec(mouse_right_spec)
 
     # Convert 1-based indices to 0-based for pygame
     button_toggle = one_based_to_zero(button_toggle_1b)
@@ -211,6 +252,8 @@ def load_config(path: str):
     decx          = one_based_to_zero(decx_1b)
     incy          = one_based_to_zero(incy_1b)
     decy          = one_based_to_zero(decy_1b)
+    mouse_left_btn  = one_based_to_zero(mouse_left_1b)
+    mouse_right_btn = one_based_to_zero(mouse_right_1b)
 
     if button_toggle is None:
         print("[ERROR] 'button_toggle' (or legacy 'button') is required."); sys.exit(1)
@@ -234,7 +277,7 @@ def load_config(path: str):
     if clamp_space not in ("monitor", "virtual"):
         clamp_space = "monitor"
 
-    restore_on_off = getbool("restore_on_off", False)  # default: do NOT restore (per user request)
+    restore_on_off = getbool("restore_on_off", False)  # default: do NOT restore
 
     return {
         "device_guid": device_guid, "device_index": device_index,
@@ -257,6 +300,9 @@ def load_config(path: str):
         "clamp_space": clamp_space,
         "clamp_virtual": (clamp_space == "virtual"),
         "restore_on_off": restore_on_off,
+        # mouse buttons
+        "mouse_left_btn": mouse_left_btn, "mouse_left_req_mod": mouse_left_req_mod,
+        "mouse_right_btn": mouse_right_btn, "mouse_right_req_mod": mouse_right_req_mod,
     }
 
 def open_device_by_guid_or_index(guid: str, idx: int | None):
@@ -363,6 +409,7 @@ def main():
 
     # Hold status
     hold_inc_x = hold_dec_x = hold_inc_y = hold_dec_y = False
+    mouse_hold = {"left": False, "right": False}
 
     def modifier_is_down():
         if cfg["modifier_button"] is None: return False
@@ -426,6 +473,25 @@ def main():
 
                 if event.type == pygame.JOYBUTTONDOWN and event_matches_device(event, js):
                     b = event.button
+
+                    # Mouse LEFT down
+                    if cfg.get("mouse_left_btn") is not None and b == cfg["mouse_left_btn"]:
+                        if (not cfg["mouse_left_req_mod"]) or modifier_is_down():
+                            send_mouse_button("left", True, use_sendinput=cfg["use_sendinput"])
+                            mouse_hold["left"] = True
+                            if cfg["toggle_feedback"]:
+                                print("[MOUSE] LEFT DOWN")
+                            continue
+
+                    # Mouse RIGHT down
+                    if cfg.get("mouse_right_btn") is not None and b == cfg["mouse_right_btn"]:
+                        if (not cfg["mouse_right_req_mod"]) or modifier_is_down():
+                            send_mouse_button("right", True, use_sendinput=cfg["use_sendinput"])
+                            mouse_hold["right"] = True
+                            if cfg["toggle_feedback"]:
+                                print("[MOUSE] RIGHT DOWN")
+                            continue
+
                     # Toggle (with optional modifier requirement)
                     if b == cfg["button_toggle"] and (not cfg["toggle_req_mod"] or modifier_is_down()):
                         if now - last_toggle >= debounce_s:
@@ -446,6 +512,22 @@ def main():
 
                 elif event.type == pygame.JOYBUTTONUP and event_matches_device(event, js):
                     b = event.button
+
+                    # Mouse LEFT up (release if we held it)
+                    if cfg.get("mouse_left_btn") is not None and b == cfg["mouse_left_btn"]:
+                        if mouse_hold["left"]:
+                            send_mouse_button("left", False, use_sendinput=cfg["use_sendinput"])
+                            mouse_hold["left"] = False
+                            if cfg["toggle_feedback"]:
+                                print("[MOUSE] LEFT UP")
+                    # Mouse RIGHT up
+                    if cfg.get("mouse_right_btn") is not None and b == cfg["mouse_right_btn"]:
+                        if mouse_hold["right"]:
+                            send_mouse_button("right", False, use_sendinput=cfg["use_sendinput"])
+                            mouse_hold["right"] = False
+                            if cfg["toggle_feedback"]:
+                                print("[MOUSE] RIGHT UP")
+
                     if cfg["incx"] is not None and b == cfg["incx"]: hold_inc_x = False
                     if cfg["decx"] is not None and b == cfg["decx"]: hold_dec_x = False
                     if cfg["incy"] is not None and b == cfg["incy"]: hold_inc_y = False
