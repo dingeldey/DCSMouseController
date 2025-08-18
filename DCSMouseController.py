@@ -4,20 +4,18 @@
 #
 # Features
 # - Lists all game controllers (index, GUID, buttons) and shows available axes/hats
-# - GUID-first, index-second device selection
-# - Optional modifier button (same or second device); mark actions with 'M' (e.g., "25M")
-# - Choose target monitor; fractions (preferred) or pixels within that monitor
-# - Toggle ON/OFF; ON recenters to INI base each time; OFF does not restore cursor (configurable)
-# - Continuous hold-based adjust for X/Y at pixels/second velocity
-# - Axis-based movement for X/Y with per-axis deadzone and invert, and velocity scaling
-# - Map joystick buttons to left/right mouse clicks (from INI)
-# - Map two joystick buttons to mouse wheel scrolling (hold to scroll at a set rate)
+# - GUID-first, index-second device selection (+ optional modifier device)
+# - Optional modifier button; append 'M' to INI actions to require it
+# - Target by monitor fractions or pixels; clamp to monitor or full virtual desktop
+# - Toggle ON/OFF; ON recenters to INI base each time
+# - Continuous nudge via buttons and/or analog axes with per-axis deadzone & invert
+# - Map joystick buttons or axis-thresholds to left/right mouse click and wheel up/down
 # - Reapply cursor every repeat_ms while active; optional 1px wiggle
-# - Clamp target to selected monitor or full virtual desktop (configurable)
+# - Verbose I/O debug printing via debug_io
 #
-# Notes:
-# - INI *button* indices are 1-based (Windows-style) and converted to 0-based for pygame.
-# - INI *axis* indices are 0-based, matching what this script prints at startup.
+# Conventions:
+# - INI *buttons* are 1-based (Windows-style) and converted to 0-based for pygame.
+# - INI *axes* are 0-based (as printed at startup).
 #
 # Requires: pygame, pyautogui
 #   pip install pygame pyautogui
@@ -144,7 +142,7 @@ def send_mouse_button(button: str, down: bool, *, use_sendinput: bool):
             pass
 
 def send_mouse_wheel(ticks: int, *, use_sendinput: bool):
-    """Scroll by 'ticks' notches. Positive = scroll up, Negative = scroll down."""
+    """Scroll by 'ticks' notches. Positive = up, Negative = down."""
     if ticks == 0:
         return
     if platform.system().lower() == "windows" and use_sendinput:
@@ -211,7 +209,76 @@ def parse_button_spec(s: str | None):
     if num == "": return None, req_mod
     try: return int(num), req_mod
     except ValueError:
-        print(f"[ERROR] Invalid button/axis spec '{s}'. Use e.g. '25' or '25M'."); sys.exit(1)
+        print(f"[ERROR] Invalid button spec '{s}'. Use e.g. '25' or '25M'."); sys.exit(1)
+
+def parse_axisbtn_spec(s: str | None):
+    """
+    Parse axis-as-button spec: 'axis:<index>:<pos|neg|abs>:<threshold>[M]'
+      - index: 0-based axis index (as printed)
+      - direction: pos (>= thr), neg (<= -thr), abs (|v| >= thr)
+      - threshold: 0..1
+      - optional 'M' suffix to require the modifier
+    Returns (axis_index:int, direction:str, threshold:float, req_mod:bool) or (None, None, None, False)
+    """
+    if not s: return None, None, None, False
+    s = s.strip()
+    req_mod = s[-1].lower() == 'm'
+    core = s[:-1] if req_mod else s
+    parts = core.split(':')
+    if len(parts) != 4 or parts[0].lower() != 'axis':
+        print(f"[ERROR] Invalid axis-as-button spec '{s}'. Expected 'axis:<index>:<pos|neg|abs>:<threshold>[M]'.")
+        sys.exit(1)
+    try:
+        idx = int(parts[1])
+        direction = parts[2].lower()
+        if direction not in ('pos','neg','abs'): raise ValueError
+        thr = float(parts[3])
+        if not (0.0 <= thr <= 1.0): raise ValueError
+        return idx, direction, thr, req_mod
+    except Exception:
+        print(f"[ERROR] Invalid axis-as-button spec '{s}'. Expected 'axis:<index>:<pos|neg|abs>:<threshold>[M]'.")
+        sys.exit(1)
+
+# --- Axis → Virtual Button helper -------------------------------------------
+def axis_to_button(js, axis_index, *, threshold=0.6, direction="pos",
+                   hysteresis=0.1, state=None, enabled=True):
+    """
+    Interpret an axis as a virtual button with hysteresis.
+    Returns (pressed_now: bool, edge_down: bool, edge_up: bool, value: float)
+    """
+    if state is None:
+        state = {}
+    try:
+        v = float(js.get_axis(axis_index))
+    except Exception:
+        v = 0.0
+
+    key = (int(axis_index), str(direction).lower())
+    prev_pressed = bool(state.get(key, False))
+
+    thr = float(max(0.0, min(1.0, threshold)))
+    hys = float(max(0.0, min(thr, hysteresis)))  # cannot exceed thr
+
+    def pressed_pos(val):
+        return val >= (thr if not prev_pressed else (thr - hys))
+    def pressed_neg(val):
+        return val <= (-(thr) if not prev_pressed else -(thr - hys))
+    def pressed_abs(val):
+        limit = thr if not prev_pressed else (thr - hys)
+        return abs(val) >= limit
+
+    if not enabled:
+        pressed_now = False
+    else:
+        if key[1] == "pos":   pressed_now = pressed_pos(v)
+        elif key[1] == "neg": pressed_now = pressed_neg(v)
+        else:                 pressed_now = pressed_abs(v)
+
+    edge_down = pressed_now and not prev_pressed
+    edge_up   = (not pressed_now) and prev_pressed
+    state[key] = pressed_now
+    return pressed_now, edge_down, edge_up, v
+# ---------------------------------------------------------------------------
 
 def load_config(path: str):
     if not Path(path).exists():
@@ -266,24 +333,31 @@ def load_config(path: str):
     wheel_up_1b,      wheel_up_req_mod    = parse_button_spec(wheel_up_spec)
     wheel_down_1b,    wheel_down_req_mod  = parse_button_spec(wheel_down_spec)
 
-    # Axes (0-based indices; optional 'M')
-    axis_x_spec = sec.get("axis_x", "").strip()  # e.g., "0" or "0M"
+    # Axis-based analog movement (0-based)
+    axis_x_spec = sec.get("axis_x", "").strip()
     axis_y_spec = sec.get("axis_y", "").strip()
     axis_x_raw, axis_x_req_mod = parse_button_spec(axis_x_spec)
     axis_y_raw, axis_y_req_mod = parse_button_spec(axis_y_spec)
-    axis_x = axis_x_raw  # already 0-based in INI
+    axis_x = axis_x_raw
     axis_y = axis_y_raw
-
-    # Per-axis deadzones and invert
-    # Keep global 'axis_deadzone' for backward-compat, but prefer per-axis if provided.
     axis_deadzone_global = sec.getfloat("axis_deadzone", fallback=0.15)
     adx = f_or_none("axis_deadzone_x"); ady = f_or_none("axis_deadzone_y")
     axis_deadzone_x = float(adx if adx is not None else axis_deadzone_global)
     axis_deadzone_y = float(ady if ady is not None else axis_deadzone_global)
     axis_invert_x = getbool("axis_invert_x", False)
     axis_invert_y = getbool("axis_invert_y", False)
-
     axis_velocity = sec.getint("axis_velocity_px_s", fallback=800)
+
+    # Axis-as-button mappings (thresholded)
+    axisbtn_left_spec  = sec.get("axisbtn_mouse_left",  "").strip()
+    axisbtn_right_spec = sec.get("axisbtn_mouse_right", "").strip()
+    axisbtn_wu_spec    = sec.get("axisbtn_wheel_up",    "").strip()
+    axisbtn_wd_spec    = sec.get("axisbtn_wheel_down",  "").strip()
+    ab_left  = parse_axisbtn_spec(axisbtn_left_spec)  if axisbtn_left_spec  else (None,None,None,False)
+    ab_right = parse_axisbtn_spec(axisbtn_right_spec) if axisbtn_right_spec else (None,None,None,False)
+    ab_wu    = parse_axisbtn_spec(axisbtn_wu_spec)    if axisbtn_wu_spec    else (None,None,None,False)
+    ab_wd    = parse_axisbtn_spec(axisbtn_wd_spec)    if axisbtn_wd_spec    else (None,None,None,False)
+    axis_button_hysteresis = sec.getfloat("axis_button_hysteresis", fallback=0.10)
 
     # Convert 1-based *buttons* to 0-based for pygame
     button_toggle = one_based_to_zero(button_toggle_1b)
@@ -319,9 +393,11 @@ def load_config(path: str):
     if clamp_space not in ("monitor", "virtual"):
         clamp_space = "monitor"
 
-    restore_on_off = getbool("restore_on_off", False)  # default: do NOT restore
+    restore_on_off = getbool("restore_on_off", False)
 
     wheel_rate = sec.getint("wheel_ticks_per_second", fallback=30)
+
+    debug_io = getbool("debug_io", False)
 
     return {
         "device_guid": device_guid, "device_index": device_index,
@@ -341,6 +417,7 @@ def load_config(path: str):
         "toggle_feedback": getbool("toggle_feedback", True),
         "log_apply": getbool("log_apply", False),
         "debug_buttons": getbool("debug_buttons", False),
+        "debug_io": debug_io,
         "clamp_space": clamp_space,
         "clamp_virtual": (clamp_space == "virtual"),
         "restore_on_off": restore_on_off,
@@ -351,7 +428,7 @@ def load_config(path: str):
         "wheel_up_btn": wheel_up_btn, "wheel_up_req_mod": wheel_up_req_mod,
         "wheel_down_btn": wheel_down_btn, "wheel_down_req_mod": wheel_down_req_mod,
         "wheel_rate": int(wheel_rate),
-        # axes
+        # axes (analog movement)
         "axis_x": axis_x, "axis_x_req_mod": axis_x_req_mod,
         "axis_y": axis_y, "axis_y_req_mod": axis_y_req_mod,
         "axis_deadzone_x": float(axis_deadzone_x),
@@ -359,6 +436,12 @@ def load_config(path: str):
         "axis_velocity": int(axis_velocity),
         "axis_invert_x": axis_invert_x,
         "axis_invert_y": axis_invert_y,
+        # axis-as-button mappings (thresholded)
+        "axisbtn_left": ab_left,
+        "axisbtn_right": ab_right,
+        "axisbtn_wu": ab_wu,
+        "axisbtn_wd": ab_wd,
+        "axis_button_hysteresis": float(axis_button_hysteresis),
     }
 
 def open_device_by_guid_or_index(guid: str, idx: int | None):
@@ -465,9 +548,18 @@ def main():
 
     # Hold status
     hold_inc_x = hold_dec_x = hold_inc_y = hold_dec_y = False
-    mouse_hold = {"left": False, "right": False}
-    hold_wheel_up = hold_wheel_down = False
-    wheel_accum = 0.0  # accumulate fractional ticks across frames
+
+    # Mouse & wheel state with per-source aggregation (button vs axis)
+    mouse_state = {"left": {"btn": False, "axis": False},
+                   "right": {"btn": False, "axis": False}}
+    mouse_down_sent = {"left": False, "right": False}
+
+    wheel_state = {"up": {"btn": False, "axis": False},
+                   "down": {"btn": False, "axis": False}}
+    wheel_accum = 0.0  # fractional ticks
+
+    # Axis-as-button state
+    axis_button_state = {}
 
     def modifier_is_down():
         if cfg["modifier_button"] is None: return False
@@ -482,6 +574,19 @@ def main():
             sendinput_move_absolute_virtual(x, y)
         else:
             pyautogui.moveTo(x, y)
+
+    def reconcile_mouse(button: str):
+        want = mouse_state[button]["btn"] or mouse_state[button]["axis"]
+        if want and not mouse_down_sent[button]:
+            send_mouse_button(button, True, use_sendinput=cfg["use_sendinput"])
+            mouse_down_sent[button] = True
+            if cfg["toggle_feedback"] or cfg["debug_io"]:
+                print(f"[MOUSE] {button.upper()} DOWN")
+        elif (not want) and mouse_down_sent[button]:
+            send_mouse_button(button, False, use_sendinput=cfg["use_sendinput"])
+            mouse_down_sent[button] = False
+            if cfg["toggle_feedback"] or cfg["debug_io"]:
+                print(f"[MOUSE] {button.upper()} UP")
 
     def toggle_on():
         nonlocal active, saved_cursor, last_apply, wiggle_flip, target_x, target_y
@@ -531,39 +636,29 @@ def main():
                 if event.type == pygame.JOYBUTTONDOWN and event_matches_device(event, js):
                     b = event.button
 
-                    # Mouse LEFT down
+                    # Mouse LEFT via button
                     if cfg.get("mouse_left_btn") is not None and b == cfg["mouse_left_btn"]:
                         if (not cfg["mouse_left_req_mod"]) or modifier_is_down():
-                            send_mouse_button("left", True, use_sendinput=cfg["use_sendinput"])
-                            mouse_hold["left"] = True
-                            if cfg["toggle_feedback"]:
-                                print("[MOUSE] LEFT DOWN")
-                            continue
+                            mouse_state["left"]["btn"] = True
+                            reconcile_mouse("left"); continue
 
-                    # Mouse RIGHT down
+                    # Mouse RIGHT via button
                     if cfg.get("mouse_right_btn") is not None and b == cfg["mouse_right_btn"]:
                         if (not cfg["mouse_right_req_mod"]) or modifier_is_down():
-                            send_mouse_button("right", True, use_sendinput=cfg["use_sendinput"])
-                            mouse_hold["right"] = True
-                            if cfg["toggle_feedback"]:
-                                print("[MOUSE] RIGHT DOWN")
-                            continue
+                            mouse_state["right"]["btn"] = True
+                            reconcile_mouse("right"); continue
 
-                    # Wheel UP start
+                    # Wheel via button (hold)
                     if cfg.get("wheel_up_btn") is not None and b == cfg["wheel_up_btn"]:
                         if (not cfg["wheel_up_req_mod"]) or modifier_is_down():
-                            hold_wheel_up = True
-                            if cfg["toggle_feedback"]:
-                                print("[WHEEL] UP HOLD")
-                            continue
-
-                    # Wheel DOWN start
+                            wheel_state["up"]["btn"] = True
+                            if cfg["toggle_feedback"] or cfg["debug_io"]:
+                                print("[WHEEL] UP HOLD (btn)"); continue
                     if cfg.get("wheel_down_btn") is not None and b == cfg["wheel_down_btn"]:
                         if (not cfg["wheel_down_req_mod"]) or modifier_is_down():
-                            hold_wheel_down = True
-                            if cfg["toggle_feedback"]:
-                                print("[WHEEL] DOWN HOLD")
-                            continue
+                            wheel_state["down"]["btn"] = True
+                            if cfg["toggle_feedback"] or cfg["debug_io"]:
+                                print("[WHEEL] DOWN HOLD (btn)"); continue
 
                     # Toggle (with optional modifier requirement)
                     if b == cfg["button_toggle"] and (not cfg["toggle_req_mod"] or modifier_is_down()):
@@ -573,6 +668,7 @@ def main():
                     if cfg["button_off"] is not None and b == cfg["button_off"] and (not cfg["off_req_mod"] or modifier_is_down()):
                         if now - last_toggle >= debounce_s:
                             toggle_off(); last_toggle = now; continue
+
                     # Start HOLD-only nudges (no one-shot steps)
                     if cfg["incx"] is not None and b == cfg["incx"]:
                         hold_inc_x = True; continue
@@ -586,31 +682,19 @@ def main():
                 elif event.type == pygame.JOYBUTTONUP and event_matches_device(event, js):
                     b = event.button
 
-                    # Mouse LEFT up (release if we held it)
                     if cfg.get("mouse_left_btn") is not None and b == cfg["mouse_left_btn"]:
-                        if mouse_hold["left"]:
-                            send_mouse_button("left", False, use_sendinput=cfg["use_sendinput"])
-                            mouse_hold["left"] = False
-                            if cfg["toggle_feedback"]:
-                                print("[MOUSE] LEFT UP")
-                    # Mouse RIGHT up
+                        mouse_state["left"]["btn"] = False; reconcile_mouse("left")
                     if cfg.get("mouse_right_btn") is not None and b == cfg["mouse_right_btn"]:
-                        if mouse_hold["right"]:
-                            send_mouse_button("right", False, use_sendinput=cfg["use_sendinput"])
-                            mouse_hold["right"] = False
-                            if cfg["toggle_feedback"]:
-                                print("[MOUSE] RIGHT UP")
+                        mouse_state["right"]["btn"] = False; reconcile_mouse("right")
 
-                    # Wheel UP end
                     if cfg.get("wheel_up_btn") is not None and b == cfg["wheel_up_btn"]:
-                        hold_wheel_up = False
-                        if cfg["toggle_feedback"]:
-                            print("[WHEEL] UP RELEASE")
-                    # Wheel DOWN end
+                        wheel_state["up"]["btn"] = False
+                        if cfg["toggle_feedback"] or cfg["debug_io"]:
+                            print("[WHEEL] UP RELEASE (btn)")
                     if cfg.get("wheel_down_btn") is not None and b == cfg["wheel_down_btn"]:
-                        hold_wheel_down = False
-                        if cfg["toggle_feedback"]:
-                            print("[WHEEL] DOWN RELEASE")
+                        wheel_state["down"]["btn"] = False
+                        if cfg["toggle_feedback"] or cfg["debug_io"]:
+                            print("[WHEEL] DOWN RELEASE (btn)")
 
                     if cfg["incx"] is not None and b == cfg["incx"]: hold_inc_x = False
                     if cfg["decx"] is not None and b == cfg["decx"]: hold_dec_x = False
@@ -637,22 +721,82 @@ def main():
             if cfg.get("axis_x") is not None:
                 try:
                     ax = float(js.get_axis(cfg["axis_x"]))
+                    raw = ax
                     if cfg["axis_invert_x"]: ax = -ax
                     if abs(ax) < cfg["axis_deadzone_x"] or (cfg["axis_x_req_mod"] and not modifier_is_down()):
                         ax = 0.0
                     step_x_axis = int(round(ax * cfg["axis_velocity"] * dt))
+                    if cfg["debug_io"] and (step_x_axis != 0):
+                        print(f"[AXIS] X raw={raw:+.3f} eff={ax:+.3f} step={step_x_axis}")
                 except Exception:
                     pass
 
             if cfg.get("axis_y") is not None:
                 try:
                     ay = float(js.get_axis(cfg["axis_y"]))
+                    raw = ay
                     if cfg["axis_invert_y"]: ay = -ay
                     if abs(ay) < cfg["axis_deadzone_y"] or (cfg["axis_y_req_mod"] and not modifier_is_down()):
                         ay = 0.0
                     step_y_axis = int(round(ay * cfg["axis_velocity"] * dt))
+                    if cfg["debug_io"] and (step_y_axis != 0):
+                        print(f"[AXIS] Y raw={raw:+.3f} eff={ay:+.3f} step={step_y_axis}")
                 except Exception:
                     pass
+
+            # --- AXIS-AS-BUTTON (thresholded) for clicks and wheel ---
+            hys = cfg["axis_button_hysteresis"]
+
+            # LEFT CLICK via axis
+            aidx, dirc, thr, req = cfg["axisbtn_left"]
+            if aidx is not None:
+                pressed, ed, eu, val = axis_to_button(
+                    js, aidx, threshold=thr, direction=dirc, hysteresis=hys,
+                    state=axis_button_state, enabled=(not req or modifier_is_down())
+                )
+                mouse_state["left"]["axis"] = pressed
+                reconcile_mouse("left")
+                if cfg["debug_io"] and (ed or eu):
+                    print(f"[AXBTN] LEFT {('DOWN' if ed else 'UP  ')} via axis:{aidx}:{dirc} thr={thr:.2f} val={val:+.3f}")
+
+            # RIGHT CLICK via axis
+            aidx, dirc, thr, req = cfg["axisbtn_right"]
+            if aidx is not None:
+                pressed, ed, eu, val = axis_to_button(
+                    js, aidx, threshold=thr, direction=dirc, hysteresis=hys,
+                    state=axis_button_state, enabled=(not req or modifier_is_down())
+                )
+                mouse_state["right"]["axis"] = pressed
+                reconcile_mouse("right")
+                if cfg["debug_io"] and (ed or eu):
+                    print(f"[AXBTN] RIGHT {('DOWN' if ed else 'UP  ')} via axis:{aidx}:{dirc} thr={thr:.2f} val={val:+.3f}")
+
+            # WHEEL UP via axis
+            aidx, dirc, thr, req = cfg["axisbtn_wu"]
+            wheel_axis_up = False
+            if aidx is not None:
+                pressed, ed, eu, val = axis_to_button(
+                    js, aidx, threshold=thr, direction=dirc, hysteresis=hys,
+                    state=axis_button_state, enabled=(not req or modifier_is_down())
+                )
+                wheel_axis_up = pressed
+                if cfg["debug_io"] and (ed or eu):
+                    print(f"[AXBTN] WHEEL UP {('HOLD' if pressed else 'RELEASE')} axis:{aidx}:{dirc} thr={thr:.2f} val={val:+.3f}")
+
+            # WHEEL DOWN via axis
+            aidx, dirc, thr, req = cfg["axisbtn_wd"]
+            wheel_axis_down = False
+            if aidx is not None:
+                pressed, ed, eu, val = axis_to_button(
+                    js, aidx, threshold=thr, direction=dirc, hysteresis=hys,
+                    state=axis_button_state, enabled=(not req or modifier_is_down())
+                )
+                wheel_axis_down = pressed
+                if cfg["debug_io"] and (ed or eu):
+                    print(f"[AXBTN] WHEEL DOWN {('HOLD' if pressed else 'RELEASE')} axis:{aidx}:{dirc} thr={thr:.2f} val={val:+.3f}")
+
+            wheel_state["up"]["axis"] = wheel_axis_up
+            wheel_state["down"]["axis"] = wheel_axis_down
 
             # --- APPLY TOTAL MOVEMENT ---
             step_x = step_x_btn + step_x_axis
@@ -661,19 +805,23 @@ def main():
             if step_x != 0 or step_y != 0:
                 target_x += step_x; target_y += step_y
                 target_x, target_y = clamp_target(target_x, target_y, mon, cfg["clamp_virtual"])
+                if cfg["debug_io"]:
+                    print(f"[MOVE] dx={step_x:+d} dy={step_y:+d} → target=({target_x},{target_y})")
                 if active:
                     apply_cursor(); last_apply = now; wiggle_flip = not wiggle_flip
 
-            # --- WHEEL: continuous scrolling while held ---
+            # --- WHEEL: continuous scrolling while held (btn or axis) ---
             net_rate = 0.0
-            if hold_wheel_up  and ((not cfg["wheel_up_req_mod"])   or modifier_is_down()):   net_rate += cfg["wheel_rate"]
-            if hold_wheel_down and ((not cfg["wheel_down_req_mod"]) or modifier_is_down()):  net_rate -= cfg["wheel_rate"]
+            if (wheel_state["up"]["btn"] or wheel_state["up"]["axis"]):     net_rate += cfg["wheel_rate"]
+            if (wheel_state["down"]["btn"] or wheel_state["down"]["axis"]): net_rate -= cfg["wheel_rate"]
 
             if net_rate != 0.0:
                 wheel_accum += net_rate * dt
                 ticks = int(wheel_accum)  # trunc toward 0
                 if ticks != 0:
                     send_mouse_wheel(ticks, use_sendinput=cfg["use_sendinput"])
+                    if cfg["debug_io"]:
+                        print(f"[WHEEL] ticks={ticks} (accum={wheel_accum:.2f})")
                     wheel_accum -= ticks  # keep remainder
 
             # Periodic re-apply while ACTIVE (keeps cursor pinned when not moving)
