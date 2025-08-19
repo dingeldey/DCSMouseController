@@ -8,9 +8,15 @@
 #     devIdx:<index>:axis:<axis>[M|:M]        |   dev:<GUID>:axis:<axis>[M|:M]
 #     devIdx:<index>:axis:<a>:<pos|neg|abs>:<thr>[M|:M]
 #     dev:<GUID>:axis:<a>:<pos|neg|abs>:<thr>[M|:M]
+# - Multiple bindings per button/action (comma-separated lists in INI). Buttons/axis-thresholds act as OR;
+#   multiple analog axes (axis_x/axis_y) add their contributions together.
 # - Explicit modifier definition (advanced only):
 #     modifier = devIdx:<index>:button:<btn>
 #     modifier = dev:<GUID>:button:<btn>
+# - Modifier layer behavior:
+#     - Modifier DOWN  → only bindings with M/:M are active
+#     - Modifier UP    → only bindings without M/:M are active
+#     - No modifier configured → M/:M bindings never activate
 # - No global "primary device" in the INI. (Legacy numeric-only entries default to device 0.)
 # - Dedicated OFF binding removed. Use only `button_toggle` (edge-triggered).
 # - Optional (Windows-only) window focus + centering/clamping on toggle-ON (see INI).
@@ -290,9 +296,9 @@ def focus_window(hwnd: int, restore_if_minimized: bool, force_foreground: bool, 
     ok = bool(ctypes.windll.user32.SetForegroundWindow(hwnd))
     if not ok and force_foreground:
         user32 = ctypes.windll.user32
-        user32.keybd_event(VK_MENU, 0, 0, 0)
+        user32.keybd_event(0x12, 0, 0, 0)  # ALT down
         ok = bool(user32.SetForegroundWindow(hwnd))
-        user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
+        user32.keybd_event(0x12, 0, 0x0002, 0)  # ALT up
     if debug:
         print(f"[WIN] SetForegroundWindow → {'OK' if ok else 'FAILED'} (hwnd=0x{hwnd:08X})")
     return ok
@@ -433,6 +439,24 @@ def parse_any_binding(s: str, default_dev: int, resolve_dev_token, *,
     print(f"[ERROR] Could not parse binding '{s}'.")
     sys.exit(1)
 
+def parse_binding_list(raw: str, default_dev: int, resolve_dev_token, *,
+                       allow_axis_analog: bool, allow_axisbtn: bool, allow_button: bool) -> List[Binding]:
+    """
+    Accept a comma-separated list of bindings. Whitespace is ignored around commas.
+    Empty input → empty list.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return []
+    items = [tok.strip() for tok in raw.split(",") if tok.strip()]
+    result: List[Binding] = []
+    for tok in items:
+        b = parse_any_binding(tok, default_dev, resolve_dev_token,
+                              allow_axis_analog=allow_axis_analog, allow_axisbtn=allow_axisbtn, allow_button=allow_button)
+        if b is not None:
+            result.append(b)
+    return result
+
 # ---------- Axis-as-button helper --------------------------------------------
 
 def axis_to_button(js, axis_index, *, direction="pos", threshold=0.6,
@@ -523,12 +547,9 @@ def load_config(path: str, devices: List[tuple]) -> Dict[str, Any]:
         else:
             print(f"[ERROR] modifier must be 'devIdx:<dev>:button:<btn>' or 'dev:<GUID>:button:<btn>'. Got '{modifier_sel}'."); sys.exit(1)
 
-    # Axis analog movement (support legacy or extended)
-    axis_x_raw = sec.get("axis_x", "").strip()
-    axis_y_raw = sec.get("axis_y", "").strip()
-
-    def PA(name, *, allow_axis_analog=False, allow_axisbtn=True, allow_button=True):
-        return parse_any_binding(
+    # Helper for lists
+    def PL(name, *, allow_axis_analog=False, allow_axisbtn=True, allow_button=True) -> List[Binding]:
+        return parse_binding_list(
             sec.get(name, "").strip(),
             default_dev=default_device_for_legacy,
             resolve_dev_token=resolve_dev_token,
@@ -538,33 +559,24 @@ def load_config(path: str, devices: List[tuple]) -> Dict[str, Any]:
         )
 
     # Actions (NO dedicated 'off' anymore)
-    b_toggle = PA("button_toggle", allow_axisbtn=True, allow_button=True)
-    if b_toggle is None:
+    lst_toggle = PL("button_toggle", allow_axisbtn=True, allow_button=True)
+    if len(lst_toggle) == 0:
         print("[ERROR] 'button_toggle' is required."); sys.exit(1)
 
-    b_inc_x  = PA("button_inc_x", allow_axisbtn=True, allow_button=True)
-    b_dec_x  = PA("button_dec_x", allow_axisbtn=True, allow_button=True)
-    b_inc_y  = PA("button_inc_y", allow_axisbtn=True, allow_button=True)
-    b_dec_y  = PA("button_dec_y", allow_axisbtn=True, allow_button=True)
+    lst_inc_x  = PL("button_inc_x", allow_axisbtn=True, allow_button=True)
+    lst_dec_x  = PL("button_dec_x", allow_axisbtn=True, allow_button=True)
+    lst_inc_y  = PL("button_inc_y", allow_axisbtn=True, allow_button=True)
+    lst_dec_y  = PL("button_dec_y", allow_axisbtn=True, allow_button=True)
 
-    b_mouse_l = PA("button_mouse_left",  allow_axisbtn=True, allow_button=True)
-    b_mouse_r = PA("button_mouse_right", allow_axisbtn=True, allow_button=True)
+    lst_mouse_l = PL("button_mouse_left",  allow_axisbtn=True, allow_button=True)
+    lst_mouse_r = PL("button_mouse_right", allow_axisbtn=True, allow_button=True)
 
-    b_wheel_up   = PA("button_wheel_up",   allow_axisbtn=True, allow_button=True)
-    b_wheel_down = PA("button_wheel_down", allow_axisbtn=True, allow_button=True)
+    lst_wheel_up   = PL("button_wheel_up",   allow_axisbtn=True, allow_button=True)
+    lst_wheel_down = PL("button_wheel_down", allow_axisbtn=True, allow_button=True)
 
-    # Analog axis movement for X/Y (accept legacy or extended)
-    def parse_axis_analog(raw: str):
-        if not raw: return None
-        if raw.strip().lower().startswith(("dev:", "devidx:", "index:", "device:")):
-            return parse_any_binding(raw, default_device_for_legacy,
-                                     resolve_dev_token=resolve_dev_token,
-                                     allow_axis_analog=True, allow_axisbtn=False, allow_button=False)
-        else:
-            return parse_legacy_button_or_axis(raw, default_device_for_legacy, expect_axis_analog=True)
-
-    ax_x = parse_axis_analog(axis_x_raw)
-    ax_y = parse_axis_analog(axis_y_raw)
+    # Analog axis movement for X/Y (lists)
+    lst_ax_x = PL("axis_x", allow_axis_analog=True, allow_axisbtn=False, allow_button=False)
+    lst_ax_y = PL("axis_y", allow_axis_analog=True, allow_axisbtn=False, allow_button=False)
 
     # Per-axis deadzones/invert/velocity
     axis_deadzone_global = sec.getfloat("axis_deadzone", fallback=0.15)
@@ -631,15 +643,15 @@ def load_config(path: str, devices: List[tuple]) -> Dict[str, Any]:
         "modifier_button": modifier_button,
 
         "bindings": {
-            "toggle": b_toggle,
-            "inc_x": b_inc_x, "dec_x": b_dec_x,
-            "inc_y": b_inc_y, "dec_y": b_dec_y,
-            "mouse_left":  b_mouse_l,
-            "mouse_right": b_mouse_r,
-            "wheel_up":    b_wheel_up,
-            "wheel_down":  b_wheel_down,
-            "axis_x": ax_x,
-            "axis_y": ax_y,
+            "toggle": lst_toggle,
+            "inc_x": lst_inc_x, "dec_x": lst_dec_x,
+            "inc_y": lst_inc_y, "dec_y": lst_dec_y,
+            "mouse_left":  lst_mouse_l,
+            "mouse_right": lst_mouse_r,
+            "wheel_up":    lst_wheel_up,
+            "wheel_down":  lst_wheel_down,
+            "axis_x": lst_ax_x,
+            "axis_y": lst_ax_y,
         },
 
         "axis_deadzone_x": float(axis_deadzone_x),
@@ -738,9 +750,10 @@ def main():
 
     # -------- Open all referenced devices --------
     used_devs = set()
-    for b in cfg["bindings"].values():
-        if isinstance(b, Binding):
-            used_devs.add(b.dev)
+    for blist in cfg["bindings"].values():
+        for b in blist:
+            if isinstance(b, Binding):
+                used_devs.add(b.dev)
     if cfg["modifier_button"] is not None and cfg["modifier_dev"] is not None:
         used_devs.add(cfg["modifier_dev"])
 
@@ -786,29 +799,39 @@ def main():
     wiggle_flip = False
     last_toggle = time.monotonic(); debounce_s = 0.15
 
-    # Movement hold flags (from button and axisbtn)
-    hold_inc_x_btn = hold_dec_x_btn = hold_inc_y_btn = hold_dec_y_btn = False
-    hold_inc_x_axb = hold_dec_x_axb = hold_inc_y_axb = hold_dec_y_axb = False
+    # --- Helper: modifier gating (layer behavior)
+    def modifier_is_down():
+        if cfg["modifier_button"] is None: return False
+        try: return bool(js_mod.get_button(cfg["modifier_button"]))
+        except Exception: return False
+
+    def binding_active(b: Binding) -> bool:
+        """Only allow non-mod bindings when modifier is UP, and only mod-required bindings when modifier is DOWN."""
+        if not isinstance(b, Binding):
+            return False
+        if cfg["modifier_button"] is None:
+            return not b.req_mod
+        mod = modifier_is_down()
+        return b.req_mod if mod else (not b.req_mod)
+
+    # --- Button hold states per binding (since multiple bindings per action)
+    btn_hold_state: Dict[Tuple[str,int], bool] = {}
+    axbtn_prev: Dict[Tuple[str,int], bool] = {}  # previous pressed states for axis-as-button
 
     # Mouse and wheel aggregate states
-    mouse_down_sent = {"left": False, "right": False}
-    mouse_axis_pressed = {"left": False, "right": False}
-    mouse_btn_pressed  = {"left": False, "right": False}
-    wheel_axis_hold = {"up": False, "down": False}
-    wheel_btn_hold  = {"up": False, "down": False}
     wheel_accum = 0.0
-
-    # axis-as-button pressed states (per binding) for hysteresis
-    axbtn_prev: Dict[Tuple[str], bool] = {}
 
     # Window targeting (active handle & rect)
     active_hwnd: Optional[int] = None
     active_winrect: Optional[Dict[str,int]] = None
 
-    def modifier_is_down():
-        if cfg["modifier_button"] is None: return False
-        try: return bool(js_mod.get_button(cfg["modifier_button"]))
-        except Exception: return False
+    # Initialize per-binding states
+    for name, blist in cfg["bindings"].items():
+        for i, b in enumerate(blist):
+            if b.kind == "button":
+                btn_hold_state[(name, i)] = False
+            elif b.kind == "axisbtn":
+                axbtn_prev[(name, i)] = False
 
     def apply_cursor():
         x = target_x + (1 if (cfg["wiggle_one_pixel"] and wiggle_flip) else 0)
@@ -818,17 +841,16 @@ def main():
         else:
             pyautogui.moveTo(x, y)
 
-    def mouse_reconcile(button: str, want_down: bool):
-        if want_down and not mouse_down_sent[button]:
-            send_mouse_button(button, True, use_sendinput=cfg["use_sendinput"])
-            mouse_down_sent[button] = True
+    def mouse_reconcile(side: str, want_down: bool):
+        # side: "left" | "right"
+        state = getattr(mouse_reconcile, "state", {"left": False, "right": False})
+        prev = state[side]
+        if want_down != prev:
+            send_mouse_button(side, want_down, use_sendinput=cfg["use_sendinput"])
+            state[side] = want_down
             if cfg["toggle_feedback"] or cfg["debug_io"]:
-                print(f"[MOUSE] {button.upper()} DOWN")
-        elif (not want_down) and mouse_down_sent[button]:
-            send_mouse_button(button, False, use_sendinput=cfg["use_sendinput"])
-            mouse_down_sent[button] = False
-            if cfg["toggle_feedback"] or cfg["debug_io"]:
-                print(f"[MOUSE] {button.upper()} UP")
+                print(f"[MOUSE] {side.upper()} {'DOWN' if want_down else 'UP'}")
+        setattr(mouse_reconcile, "state", state)
 
     def compute_window_target(rect: Dict[str,int]) -> Tuple[int,int]:
         if cfg["window_x_frac"] is not None and cfg["window_y_frac"] is not None:
@@ -855,22 +877,22 @@ def main():
         active_hwnd = None
         active_winrect = None
         if platform.system().lower() == "windows" and (cfg["focus_on_toggle"] or cfg["center_in_window_on_toggle"] or cfg["clamp_space"] == "window"):
-            hwnd = find_window(cfg["focus_window_title"], cfg["focus_window_class"], debug=cfg["debug_window"])
+            hwnd = find_window(cfg["focus_window_title"], cfg["focus_window_class"], debug=cfg.get("debug_window", False))
             if hwnd:
                 if cfg["focus_on_toggle"]:
-                    focus_window(hwnd, cfg["window_restore_if_minimized"], cfg["window_force_foreground"], debug=cfg["debug_window"])
+                    focus_window(hwnd, cfg["window_restore_if_minimized"], cfg["window_force_foreground"], debug=cfg.get("debug_window", False))
                     time.sleep(0.05)  # let it settle before reading rect
                 rect = _client_rect_screen(hwnd) or _window_rect_screen(hwnd)
                 if rect:
                     active_hwnd = hwnd
                     active_winrect = rect
-                    if cfg["debug_window"]:
+                    if cfg.get("debug_window", False):
                         print(f"[WIN] client rect: x={rect['x']} y={rect['y']} w={rect['w']} h={rect['h']}")
                 else:
-                    if cfg["debug_window"]:
+                    if cfg.get("debug_window", False):
                         print("[WIN] Could not read client/window rect.")
             else:
-                if cfg["debug_window"]:
+                if cfg.get("debug_window", False):
                     print("[WIN] No matching window found.")
 
         # ALWAYS recenter when turning on
@@ -917,6 +939,8 @@ def main():
             dt = now - prev_time
             prev_time = now
 
+            # ---------------- Button event processing ----------------
+            toggled_this_event = False
             for event in pygame.event.get():
                 if now < grace_until:
                     continue
@@ -932,28 +956,34 @@ def main():
 
                     is_down = (event.type == pygame.JOYBUTTONDOWN)
 
-                    for name, b in cfg["bindings"].items():
-                        if not isinstance(b, Binding) or b.kind != "button": continue
-                        if b.dev == dev_idx and hasattr(event, "button") and (event.button == b.btn):
-                            if b.req_mod and not modifier_is_down():
+                    # Walk every action that has button-type bindings
+                    for name, blist in cfg["bindings"].items():
+                        for i, b in enumerate(blist):
+                            if b.kind != "button":
                                 continue
-                            if name == "toggle":
-                                if is_down and (now - last_toggle) >= debounce_s:
-                                    (toggle_off() if active else toggle_on()); last_toggle = now
-                            elif name == "inc_x":   hold_inc_x_btn = is_down
-                            elif name == "dec_x":   hold_dec_x_btn = is_down
-                            elif name == "inc_y":   hold_inc_y_btn = is_down
-                            elif name == "dec_y":   hold_dec_y_btn = is_down
-                            elif name == "mouse_left":
-                                mouse_btn_pressed["left"] = is_down
-                                mouse_reconcile("left", mouse_btn_pressed["left"]  or mouse_axis_pressed["left"])
-                            elif name == "mouse_right":
-                                mouse_btn_pressed["right"] = is_down
-                                mouse_reconcile("right", mouse_btn_pressed["right"] or mouse_axis_pressed["right"])
-                            elif name == "wheel_up":
-                                wheel_btn_hold["up"] = is_down
-                            elif name == "wheel_down":
-                                wheel_btn_hold["down"] = is_down
+                            if b.dev == dev_idx and hasattr(event, "button") and (event.button == b.btn):
+                                if not binding_active(b):
+                                    continue
+                                if name == "toggle":
+                                    if is_down and not toggled_this_event and (now - last_toggle) >= debounce_s:
+                                        (toggle_off() if active else toggle_on()); last_toggle = now
+                                        toggled_this_event = True
+                                elif name == "inc_x":
+                                    btn_hold_state[(name, i)] = is_down
+                                elif name == "dec_x":
+                                    btn_hold_state[(name, i)] = is_down
+                                elif name == "inc_y":
+                                    btn_hold_state[(name, i)] = is_down
+                                elif name == "dec_y":
+                                    btn_hold_state[(name, i)] = is_down
+                                elif name == "mouse_left":
+                                    btn_hold_state[(name, i)] = is_down
+                                elif name == "mouse_right":
+                                    btn_hold_state[(name, i)] = is_down
+                                elif name == "wheel_up":
+                                    btn_hold_state[(name, i)] = is_down
+                                elif name == "wheel_down":
+                                    btn_hold_state[(name, i)] = is_down
 
                 elif event.type == pygame.JOYDEVICEREMOVED:
                     ev_dev_id = getattr(event, "instance_id", None)
@@ -964,39 +994,61 @@ def main():
 
             # ---------- Axis-as-button polling (toggle/nudges/mouse/wheel)
             hys = cfg["axis_button_hysteresis"]
-            def poll_axbtn(name: str) -> bool:
-                nonlocal last_toggle, active
-                b = cfg["bindings"].get(name)
-                if not isinstance(b, Binding) or b.kind != "axisbtn": return False
-                if b.req_mod and not modifier_is_down():
-                    axbtn_prev[(name,)] = False
-                    return False
-                js = get_js_for(b)
-                if js is None: return False
-                prev_p = axbtn_prev.get((name,), False)
-                pressed, ed, eu, val = axis_to_button(js, b.axis, direction=b.dir, threshold=b.thr,
-                                                      hysteresis=hys, prev_pressed=prev_p)
-                axbtn_prev[(name,)] = pressed
-                if cfg["debug_io"] and (ed or eu):
-                    print(f"[AXBTN] {name} {('DOWN' if ed else 'UP  ')} dev={b.dev} axis={b.axis} dir={b.dir} thr={b.thr:.2f} val={val:+.3f}")
-                if name == "toggle" and ed and (time.monotonic()-last_toggle) >= debounce_s:
-                    (toggle_off() if active else toggle_on()); last_toggle = time.monotonic()
-                return pressed
 
-            _ = poll_axbtn("toggle")
+            toggled_this_tick = False
+            def poll_axbtn_any(name: str) -> bool:
+                nonlocal last_toggle, toggled_this_tick
+                any_pressed = False
+                for i, b in enumerate(cfg["bindings"].get(name, [])):
+                    if b.kind != "axisbtn":
+                        continue
+                    if not binding_active(b):
+                        axbtn_prev[(name, i)] = False
+                        continue
+                    js = get_js_for(b)
+                    if js is None:
+                        continue
+                    prev_p = axbtn_prev.get((name, i), False)
+                    pressed, ed, eu, val = axis_to_button(js, b.axis, direction=b.dir, threshold=b.thr,
+                                                          hysteresis=hys, prev_pressed=prev_p)
+                    axbtn_prev[(name, i)] = pressed
+                    if cfg["debug_io"] and (ed or eu):
+                        print(f"[AXBTN] {name}[{i}] {('DOWN' if ed else 'UP  ')} dev={b.dev} axis={b.axis} dir={b.dir} thr={b.thr:.2f} val={val:+.3f}")
+                    if name == "toggle" and ed and not toggled_this_tick and (time.monotonic()-last_toggle) >= debounce_s:
+                        (toggle_off() if active else toggle_on()); last_toggle = time.monotonic()
+                        toggled_this_tick = True
+                    any_pressed = any_pressed or pressed
+                return any_pressed
 
-            hold_inc_x_axb = poll_axbtn("inc_x")
-            hold_dec_x_axb = poll_axbtn("dec_x")
-            hold_inc_y_axb = poll_axbtn("inc_y")
-            hold_dec_y_axb = poll_axbtn("dec_y")
+            _ = poll_axbtn_any("toggle")
 
-            mouse_axis_pressed["left"]  = poll_axbtn("mouse_left")
-            mouse_axis_pressed["right"] = poll_axbtn("mouse_right")
-            mouse_reconcile("left",  mouse_btn_pressed["left"]  or mouse_axis_pressed["left"])
-            mouse_reconcile("right", mouse_btn_pressed["right"] or mouse_axis_pressed["right"])
+            hold_inc_x_axb = poll_axbtn_any("inc_x")
+            hold_dec_x_axb = poll_axbtn_any("dec_x")
+            hold_inc_y_axb = poll_axbtn_any("inc_y")
+            hold_dec_y_axb = poll_axbtn_any("dec_y")
 
-            wheel_axis_hold["up"]   = poll_axbtn("wheel_up")
-            wheel_axis_hold["down"] = poll_axbtn("wheel_down")
+            mouse_axis_left  = poll_axbtn_any("mouse_left")
+            mouse_axis_right = poll_axbtn_any("mouse_right")
+
+            wheel_axis_up   = poll_axbtn_any("wheel_up")
+            wheel_axis_down = poll_axbtn_any("wheel_down")
+
+            # ---------- Aggregate button-hold states per action
+            def any_btn(name: str) -> bool:
+                return any(btn_hold_state.get((name, i), False)
+                           for i, b in enumerate(cfg["bindings"].get(name, []))
+                           if b.kind == "button")
+
+            hold_inc_x_btn = any_btn("inc_x")
+            hold_dec_x_btn = any_btn("dec_x")
+            hold_inc_y_btn = any_btn("inc_y")
+            hold_dec_y_btn = any_btn("dec_y")
+
+            mouse_btn_left  = any_btn("mouse_left")
+            mouse_btn_right = any_btn("mouse_right")
+
+            wheel_btn_up   = any_btn("wheel_up")
+            wheel_btn_down = any_btn("wheel_down")
 
             # ---------- BUTTON-BASED MOVEMENT
             vx = (1 if (hold_inc_x_btn or hold_inc_x_axb) else 0) - (1 if (hold_dec_x_btn or hold_dec_x_axb) else 0)
@@ -1004,37 +1056,43 @@ def main():
             step_x_btn = int(round(vx * cfg["nudge_velocity"] * dt))
             step_y_btn = int(round(vy * cfg["nudge_velocity"] * dt))
 
-            # ---------- AXIS-BASED MOVEMENT (analog)
+            # ---------- AXIS-BASED MOVEMENT (analog) — sum contributions
             step_x_axis = 0
             step_y_axis = 0
 
-            ax_x = cfg["bindings"].get("axis_x")
-            if isinstance(ax_x, Binding) and ax_x.kind == "axis_analog":
-                js = get_js_for(ax_x)
-                if js is not None and (not ax_x.req_mod or modifier_is_down()):
-                    try:
-                        axv = float(js.get_axis(ax_x.axis))
-                        if cfg["axis_invert_x"]: axv = -axv
-                        if abs(axv) < cfg["axis_deadzone_x"]: axv = 0.0
-                        step_x_axis = int(round(axv * cfg["axis_velocity"] * dt))
-                        if cfg["debug_io"] and step_x_axis != 0:
-                            print(f"[AXIS] X dev={ax_x.dev} axis={ax_x.axis} val={axv:+.3f} step={step_x_axis}")
-                    except Exception:
-                        pass
+            for b in cfg["bindings"].get("axis_x", []):
+                if b.kind != "axis_analog" or not binding_active(b):
+                    continue
+                js = get_js_for(b)
+                if js is None:
+                    continue
+                try:
+                    axv = float(js.get_axis(b.axis))
+                    if cfg["axis_invert_x"]: axv = -axv
+                    if abs(axv) < cfg["axis_deadzone_x"]: axv = 0.0
+                    step = int(round(axv * cfg["axis_velocity"] * dt))
+                    step_x_axis += step
+                    if cfg["debug_io"] and step != 0:
+                        print(f"[AXIS] X dev={b.dev} axis={b.axis} val={axv:+.3f} step={step}")
+                except Exception:
+                    pass
 
-            ax_y = cfg["bindings"].get("axis_y")
-            if isinstance(ax_y, Binding) and ax_y.kind == "axis_analog":
-                js = get_js_for(ax_y)
-                if js is not None and (not ax_y.req_mod or modifier_is_down()):
-                    try:
-                        ayv = float(js.get_axis(ax_y.axis))
-                        if cfg["axis_invert_y"]: ayv = -ayv
-                        if abs(ayv) < cfg["axis_deadzone_y"]: ayv = 0.0
-                        step_y_axis = int(round(ayv * cfg["axis_velocity"] * dt))
-                        if cfg["debug_io"] and step_y_axis != 0:
-                            print(f"[AXIS] Y dev={ax_y.dev} axis={ax_y.axis} val={ayv:+.3f} step={step_y_axis}")
-                    except Exception:
-                        pass
+            for b in cfg["bindings"].get("axis_y", []):
+                if b.kind != "axis_analog" or not binding_active(b):
+                    continue
+                js = get_js_for(b)
+                if js is None:
+                    continue
+                try:
+                    ayv = float(js.get_axis(b.axis))
+                    if cfg["axis_invert_y"]: ayv = -ayv
+                    if abs(ayv) < cfg["axis_deadzone_y"]: ayv = 0.0
+                    step = int(round(ayv * cfg["axis_velocity"] * dt))
+                    step_y_axis += step
+                    if cfg["debug_io"] and step != 0:
+                        print(f"[AXIS] Y dev={b.dev} axis={b.axis} val={ayv:+.3f} step={step}")
+                except Exception:
+                    pass
 
             # If clamping to window and active, refresh window rect (window may move/resize)
             if cfg["clamp_space"] == "window" and active and platform.system().lower() == "windows" and active_hwnd:
@@ -1053,10 +1111,14 @@ def main():
                 if active:
                     apply_cursor(); last_apply = now; wiggle_flip = not wiggle_flip
 
-            # ---------- WHEEL (continuous while held)
+            # ---------- MOUSE BUTTONS (aggregate axis+button)
+            mouse_reconcile("left",  mouse_btn_left  or mouse_axis_left)
+            mouse_reconcile("right", mouse_btn_right or mouse_axis_right)
+
+            # ---------- WHEEL (continuous while held; aggregate axis+button)
             net_rate = 0.0
-            if wheel_btn_hold["up"]   or wheel_axis_hold["up"]:   net_rate += cfg["wheel_rate"]
-            if wheel_btn_hold["down"] or wheel_axis_hold["down"]: net_rate -= cfg["wheel_rate"]
+            if wheel_btn_up or wheel_axis_up:     net_rate += cfg["wheel_rate"]
+            if wheel_btn_down or wheel_axis_down: net_rate -= cfg["wheel_rate"]
             if net_rate != 0.0:
                 wheel_accum += net_rate * dt
                 ticks = int(wheel_accum)
