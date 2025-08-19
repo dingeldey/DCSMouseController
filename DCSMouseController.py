@@ -628,7 +628,7 @@ def main():
                 if cfg["debug_buttons"] and event.type in (pygame.JOYBUTTONDOWN, pygame.JOYBUTTONUP):
                     edge = "DOWN" if event.type == pygame.JOYBUTTONDOWN else "UP  "
                     ev_dev_id = getattr(event, "instance_id", getattr(event, "joy", None))
-                    print(f"[DBG] {edge}: dev_index={inst_to_idx.get(ev_dev_id,'?')} btn={getattr(event,'button',None)} mod={'ON' if modifier_is_down() else 'off'}")
+                    print(f"[DBG] {edge}: dev_index={inst_to_idx.get(ev_dev_id,'?')} btn={(event.button + 1) if hasattr(event,'button') else '?'} mod={'ON' if modifier_is_down() else 'off'}")
 
                 if now < grace_until:
                     continue
