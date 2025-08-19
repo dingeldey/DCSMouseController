@@ -4,19 +4,25 @@
 #
 # Highlights:
 # - Per-binding device selection to mix multiple controllers:
-#     devIdx:<index>:button:<btn>[M]       |   dev:<GUID>:button:<btn>[M]
-#     devIdx:<index>:axis:<axis>[M]        |   dev:<GUID>:axis:<axis>[M]
-#     devIdx:<index>:axis:<axis>:<pos|neg|abs>:<thr>[M]
-#     dev:<GUID>:axis:<axis>:<pos|neg|abs>:<thr>[M]
+#     devIdx:<index>:button:<btn>[M|:M]       |   dev:<GUID>:button:<btn>[M|:M]
+#     devIdx:<index>:axis:<axis>[M|:M]        |   dev:<GUID>:axis:<axis>[M|:M]
+#     devIdx:<index>:axis:<a>:<pos|neg|abs>:<thr>[M|:M]
+#     dev:<GUID>:axis:<a>:<pos|neg|abs>:<thr>[M|:M]
 # - Explicit modifier definition (advanced only):
 #     modifier = devIdx:<index>:button:<btn>
 #     modifier = dev:<GUID>:button:<btn>
 # - No global "primary device" in the INI. (Legacy numeric-only entries default to device 0.)
 # - Dedicated OFF binding removed. Use only `button_toggle` (edge-triggered).
+# - Optional (Windows-only) window focus + centering/clamping on toggle-ON (see INI).
 #
 # Notes:
 # - Buttons in INI are 1-based (Windows style). Axes are 0-based (as printed at startup).
-# - Append 'M' to any binding to require the modifier to be held.
+# - Append M either as a suffix (e.g., ...:button:12M) or as a token (e.g., ...:button:12:M)
+#   to require the global modifier to be held for that binding.
+#
+# CLI:
+#   python DCSMouseController.py --config myprofile.ini
+#   DCSMouseController.exe -c myprofile.ini
 #
 # Requires: pygame, pyautogui
 #   pip install pygame pyautogui
@@ -24,8 +30,10 @@
 import sys
 import time
 from pathlib import Path
+import argparse
 import configparser
 import ctypes
+import ctypes.wintypes as wt
 import platform
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Any, List
@@ -33,13 +41,27 @@ from typing import Optional, Tuple, Dict, Any, List
 import pygame
 import pyautogui
 
-CONFIG_FILE = "joystick_mouse.ini"
+DEFAULT_CONFIG_FILE = "joystick_mouse.ini"
 
-# ===== Windows virtual desktop + SendInput helpers =====
+# ===== Windows virtual desktop + SendInput + Window helpers =====
 SM_XVIRTUALSCREEN = 76
 SM_YVIRTUALSCREEN = 77
 SM_CXVIRTUALSCREEN = 78
 SM_CYVIRTUALSCREEN = 79
+
+def _enable_dpi_awareness():
+    if platform.system().lower() != "windows":
+        return
+    try:
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))  # Per-Monitor V2
+    except Exception:
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Per-Monitor
+        except Exception:
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()    # System DPI
+            except Exception:
+                pass
 
 def win_virtual_desktop_rect():
     user32 = ctypes.windll.user32
@@ -157,6 +179,124 @@ def send_mouse_wheel(ticks: int, *, use_sendinput: bool):
             pyautogui.scroll(int(ticks))
         except Exception:
             pass
+
+# ---- Window helpers (Windows only) ------------------------------------------
+SW_RESTORE = 9
+VK_MENU = 0x12
+KEYEVENTF_KEYUP = 0x0002
+
+def _get_title(hwnd):
+    buf_len = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+    if buf_len < 0:
+        buf_len = 0
+    buf = ctypes.create_unicode_buffer(buf_len + 1 if buf_len > 0 else 1024)
+    ctypes.windll.user32.GetWindowTextW(hwnd, buf, len(buf))
+    return buf.value
+
+def _get_class(hwnd):
+    buf = ctypes.create_unicode_buffer(256)
+    ctypes.windll.user32.GetClassNameW(hwnd, buf, 256)
+    return buf.value
+
+def _is_visible(hwnd):
+    return bool(ctypes.windll.user32.IsWindowVisible(hwnd))
+
+def _is_minimized(hwnd):
+    return bool(ctypes.windll.user32.IsIconic(hwnd))
+
+def _client_rect_screen(hwnd) -> Optional[Dict[str,int]]:
+    rc = RECT()
+    if not ctypes.windll.user32.GetClientRect(hwnd, ctypes.byref(rc)):
+        return None
+    pts = (POINT * 2)()
+    pts[0].x, pts[0].y = rc.left, rc.top
+    pts[1].x, pts[1].y = rc.right, rc.bottom
+    if ctypes.windll.user32.MapWindowPoints(hwnd, None, ctypes.byref(pts), 2) == 0:
+        return None
+    x = int(pts[0].x)
+    y = int(pts[0].y)
+    w = int(pts[1].x - pts[0].x)
+    h = int(pts[1].y - pts[0].y)
+    if w <= 0 or h <= 0:
+        return None
+    return {"x": x, "y": y, "w": w, "h": h}
+
+def _window_rect_screen(hwnd) -> Optional[Dict[str,int]]:
+    rc = RECT()
+    if ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rc)):
+        w = int(rc.right - rc.left); h = int(rc.bottom - rc.top)
+        if w > 0 and h > 0:
+            return {"x": int(rc.left), "y": int(rc.top), "w": w, "h": h}
+    return None
+
+def find_window(target_title_substr: str, target_class: str, debug: bool=False) -> Optional[int]:
+    if platform.system().lower() != "windows":
+        return None
+    u = ctypes.windll.user32
+    EnumWindows = u.EnumWindows
+    EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
+    GetWindow = u.GetWindow
+    GetWindowLongW = u.GetWindowLongW
+    GWL_EXSTYLE = -20
+    GW_OWNER = 4
+    WS_EX_TOOLWINDOW = 0x00000080
+
+    title_need = (target_title_substr or "").lower()
+    class_need = (target_class or "")
+
+    best = {"hwnd": None, "area": -1}
+
+    def is_top_level_app(hwnd):
+        if not _is_visible(hwnd): return False
+        if GetWindow(hwnd, GW_OWNER): return False
+        ex = GetWindowLongW(hwnd, GWL_EXSTYLE)
+        if ex & WS_EX_TOOLWINDOW: return False
+        return True
+
+    def cb(hwnd, lparam):
+        if not is_top_level_app(hwnd):
+            return True
+        cls = _get_class(hwnd)
+        ttl = _get_title(hwnd)
+        if class_need:
+            if cls != class_need:
+                return True
+        elif title_need:
+            if title_need not in ttl.lower():
+                return True
+        rect = _client_rect_screen(hwnd) or _window_rect_screen(hwnd)
+        if not rect:
+            return True
+        area = rect["w"] * rect["h"]
+        if area > best["area"]:
+            best["hwnd"] = hwnd
+            best["area"] = area
+            if debug:
+                print(f"[WIN] candidate hwnd=0x{hwnd:08X} class='{cls}' title='{ttl}' area={area}")
+        return True
+
+    EnumWindows(EnumWindowsProc(cb), 0)
+    if debug and best["hwnd"]:
+        print(f"[WIN] chosen hwnd=0x{best['hwnd']:08X}")
+    return best["hwnd"]
+
+def focus_window(hwnd: int, restore_if_minimized: bool, force_foreground: bool, debug: bool=False) -> bool:
+    if platform.system().lower() != "windows" or not hwnd:
+        return False
+    if restore_if_minimized and _is_minimized(hwnd):
+        if debug: print("[WIN] Restoring minimized window...")
+        ctypes.windll.user32.ShowWindow(hwnd, SW_RESTORE)
+        time.sleep(0.05)
+    ok = bool(ctypes.windll.user32.SetForegroundWindow(hwnd))
+    if not ok and force_foreground:
+        user32 = ctypes.windll.user32
+        user32.keybd_event(VK_MENU, 0, 0, 0)
+        ok = bool(user32.SetForegroundWindow(hwnd))
+        user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
+    if debug:
+        print(f"[WIN] SetForegroundWindow → {'OK' if ok else 'FAILED'} (hwnd=0x{hwnd:08X})")
+    return ok
+
 # =======================================================
 
 def init_pygame():
@@ -215,16 +355,21 @@ class Binding:
     req_mod: bool = False
 
 def _strip_reqmod(s: str) -> Tuple[str, bool]:
+    """Accepts suffix 'M' or token ':M' (case-insensitive)."""
     s = s.strip()
-    if not s: return "", False
-    if s[-1].lower() == 'm':
-        return s[:-1], True
+    if not s:
+        return "", False
+    sl = s.lower()
+    if sl.endswith(":m"):
+        return s[:-2].rstrip(), True
+    if sl.endswith("m"):
+        return s[:-1].rstrip(), True
     return s, False
 
 def parse_legacy_button_or_axis(value: str, default_dev: int, *, expect_axis_analog: bool=False) -> Optional[Binding]:
     # Legacy formats:
-    #   - buttons: '12' or '12M'  (1-based button index on default device)
-    #   - axis_x/axis_y: '0' or '0M' (0-based axis index on default device)
+    #   - buttons: '12' or '12M' or '12:M'  (1-based button index on default device)
+    #   - axis_x/axis_y: '0' or '0M' or '0:M' (0-based axis index on default device)
     if not value.strip():
         return None
     core, req = _strip_reqmod(value)
@@ -242,10 +387,10 @@ def parse_any_binding(s: str, default_dev: int, resolve_dev_token, *,
                       allow_axis_analog: bool=True, allow_axisbtn: bool=True, allow_button: bool=True) -> Optional[Binding]:
     """
     Extended formats (device can be index or GUID):
-      devIdx:<dev>:button:<btn>[M]     |   dev:<GUID>:button:<btn>[M]
-      devIdx:<dev>:axis:<axis>[M]      |   dev:<GUID>:axis:<axis>[M]
-      devIdx:<dev>:axis:<axis>:<pos|neg|abs>:<thr>[M]
-      dev:<GUID>:axis:<axis>:<pos|neg|abs>:<thr>[M]
+      devIdx:<dev>:button:<btn>[M|:M]     |   dev:<GUID>:button:<btn>[M|:M]
+      devIdx:<dev>:axis:<axis>[M|:M]      |   dev:<GUID>:axis:<axis>[M|:M]
+      devIdx:<dev>:axis:<axis>:<pos|neg|abs>:<thr>[M|:M]
+      dev:<GUID>:axis:<axis>:<pos|neg|abs>:<thr>[M|:M]
     Plus legacy fallback (see parse_legacy_button_or_axis).
     """
     s = s.strip()
@@ -324,10 +469,12 @@ def load_config(path: str, devices: List[tuple]) -> Dict[str, Any]:
     """
     devices: list of tuples (index, name, guid, buttons, instance_id) from list_devices()
     """
-    if not Path(path).exists():
-        print(f"[ERROR] Config file '{path}' not found."); sys.exit(1)
+    p = Path(path).expanduser()
+    if not p.exists():
+        print(f"[ERROR] Config file '{p}' not found."); sys.exit(1)
+
     cfgp = configparser.ConfigParser(inline_comment_prefixes=(';', '#'), interpolation=None, strict=False)
-    cfgp.read(path, encoding="utf-8")
+    cfgp.read(p, encoding="utf-8")
     if "input" not in cfgp: print("[ERROR] Missing [input] section."); sys.exit(1)
     sec = cfgp["input"]
 
@@ -366,7 +513,9 @@ def load_config(path: str, devices: List[tuple]) -> Dict[str, Any]:
     modifier_dev = None
     modifier_button = None
     if modifier_sel:
-        parts = [s.strip() for s in modifier_sel.split(":")]
+        # Allow and ignore a trailing M / :M on the modifier line
+        modifier_core, _ = _strip_reqmod(modifier_sel)
+        parts = [s.strip() for s in modifier_core.split(":")]
         if len(parts) == 4 and parts[2].lower() == "button" and parts[0].lower() in ("dev","devidx","index"):
             modifier_dev = resolve_dev_token(parts[1])
             modifier_button_1b = int(parts[3])
@@ -408,7 +557,7 @@ def load_config(path: str, devices: List[tuple]) -> Dict[str, Any]:
     def parse_axis_analog(raw: str):
         if not raw: return None
         if raw.strip().lower().startswith(("dev:", "devidx:", "index:", "device:")):
-            return parse_any_binding(raw, default_dev=default_device_for_legacy,
+            return parse_any_binding(raw, default_device_for_legacy,
                                      resolve_dev_token=resolve_dev_token,
                                      allow_axis_analog=True, allow_axisbtn=False, allow_button=False)
         else:
@@ -447,7 +596,7 @@ def load_config(path: str, devices: List[tuple]) -> Dict[str, Any]:
     nudge_velocity = max(1, sec.getint("nudge_velocity_px_s", fallback=600))
 
     clamp_space = sec.get("clamp_space", "monitor").strip().lower()
-    if clamp_space not in ("monitor", "virtual"):
+    if clamp_space not in ("monitor", "virtual", "window"):
         clamp_space = "monitor"
 
     restore_on_off = getbool("restore_on_off", False)
@@ -459,6 +608,22 @@ def load_config(path: str, devices: List[tuple]) -> Dict[str, Any]:
     debug_io = getbool("debug_io", False)
 
     wheel_rate = sec.getint("wheel_ticks_per_second", fallback=30)
+
+    # Window targeting (Windows only)
+    focus_on_toggle = getbool("focus_on_toggle", False)
+    focus_window_title = sec.get("focus_window_title", fallback="").strip()
+    focus_window_class = sec.get("focus_window_class", fallback="").strip()
+    window_restore_if_minimized = getbool("window_restore_if_minimized", True)
+    window_force_foreground = getbool("window_force_foreground", False)
+    center_in_window_on_toggle = getbool("center_in_window_on_toggle", False)
+    debug_window = getbool("debug_window", False)
+    wx_frac = f_or_none("window_x_frac"); wy_frac = f_or_none("window_y_frac")
+    wx_px = getint_or_none("window_x");  wy_px = getint_or_none("window_y")
+
+    # --- Enforcement: if clamping to window, you MUST specify a target window ---
+    if clamp_space == "window" and (not focus_window_title) and (not focus_window_class):
+        print("[ERROR] clamp_space=window requires either 'focus_window_class' or 'focus_window_title' in the INI.")
+        sys.exit(1)
 
     return {
         "modifier_dev": modifier_dev,
@@ -488,7 +653,7 @@ def load_config(path: str, devices: List[tuple]) -> Dict[str, Any]:
 
         "poll_hz": poll_hz, "startup_grace_ms": startup_grace_ms, "repeat_ms": repeat_ms,
         "nudge_velocity": nudge_velocity,
-        "clamp_space": clamp_space, "clamp_virtual": (clamp_space == "virtual"),
+        "clamp_space": clamp_space,  # 'monitor' | 'virtual' | 'window'
         "restore_on_off": restore_on_off,
 
         "wiggle_one_pixel": wiggle_one_pixel,
@@ -499,12 +664,23 @@ def load_config(path: str, devices: List[tuple]) -> Dict[str, Any]:
         "debug_io": debug_io,
 
         "wheel_rate": int(wheel_rate),
+
+        # Window targeting:
+        "focus_on_toggle": focus_on_toggle,
+        "focus_window_title": focus_window_title,
+        "focus_window_class": focus_window_class,
+        "window_restore_if_minimized": window_restore_if_minimized,
+        "window_force_foreground": window_force_foreground,
+        "center_in_window_on_toggle": center_in_window_on_toggle,
+        "debug_window": debug_window,
+        "window_x_frac": wx_frac, "window_y_frac": wy_frac,
+        "window_x": wx_px, "window_y": wy_px,
     }
 
 # ---------- Runtime -----------------------------------------------------------
 
-def clamp_target(x, y, mon, clamp_virtual):
-    if clamp_virtual:
+def clamp_target(x, y, mon, clamp_space: str, window_rect: Optional[Dict[str,int]]):
+    if clamp_space == "virtual":
         if platform.system().lower() == "windows":
             vx, vy, vw, vh = win_virtual_desktop_rect()
             x = max(vx, min(vx + vw - 1, x))
@@ -513,22 +689,37 @@ def clamp_target(x, y, mon, clamp_virtual):
             sw, sh = pyautogui.size()
             x = max(0, min(sw - 1, x))
             y = max(0, min(sh - 1, y))
-    else:
+    elif clamp_space == "window" and window_rect:
+        x = max(window_rect["x"], min(window_rect["x"] + window_rect["w"] - 1, x))
+        y = max(window_rect["y"], min(window_rect["y"] + window_rect["h"] - 1, y))
+    else:  # monitor
         x = max(mon["x"], min(mon["x"] + mon["w"] - 1, x))
         y = max(mon["y"], min(mon["y"] + mon["h"] - 1, y))
     return x, y
 
+def parse_args():
+    p = argparse.ArgumentParser(add_help=True, description="Joystick/Throttle → Mouse controller")
+    p.add_argument("-c", "--config", default=DEFAULT_CONFIG_FILE, metavar="INI",
+                   help=f"Path to configuration INI (default: {DEFAULT_CONFIG_FILE})")
+    return p.parse_args()
+
 def main():
+    args = parse_args()
+    ini_path = Path(args.config).expanduser()
+
+    _enable_dpi_awareness()
     pyautogui.FAILSAFE = False
     init_pygame()
 
     print("========================================================================")
     print("  Joystick/Throttle → Mouse Position Repeater (multi-device, GUID-ready)")
     print("========================================================================")
-    print("Pick a different INI at launch:  DCSMouseController.exe --config myprofile.ini\n")
-    devices, inst_to_idx = list_devices(); print()
+    print(f"Config: {ini_path}")
+    print("Pick a different INI at launch, e.g.:  DCSMouseController.exe --config myprofile.ini\n")
 
-    cfg = load_config(CONFIG_FILE, devices)
+    devices, inst_to_idx = list_devices(); print()
+    cfg = load_config(str(ini_path), devices)
+    print("[OK] Loaded config.")
 
     # Monitors
     if platform.system().lower() == "windows":
@@ -570,18 +761,19 @@ def main():
     print(f"[OK] Using monitor: MonIdx={mon['index']} ({'Primary' if mon['primary'] else 'Secondary'}) "
           f"x={mon['x']} y={mon['y']} w={mon['w']} h={mon['h']} Name='{mon['name']}'")
 
-    # Base target
+    # Base target (monitor-based initial)
     if cfg["x_frac"] is not None and cfg["y_frac"] is not None:
         base_x = int(round(mon["x"] + cfg["x_frac"] * mon["w"]))
         base_y = int(round(mon["y"] + cfg["y_frac"] * mon["h"]))
     else:
         base_x = int(mon["x"] + cfg["x"])
         base_y = int(mon["y"] + cfg["y"])
-    base_x, base_y = clamp_target(base_x, base_y, mon, cfg["clamp_virtual"])
+    base_x, base_y = clamp_target(base_x, base_y, mon, cfg["clamp_space"], None)
     target_x, target_y = base_x, base_y
 
     print(f"[OK] Base target: ({base_x}, {base_y}) | repeat {cfg['repeat_ms']} ms")
-    print(f"[OK] Clamp space: {'virtual desktop' if cfg['clamp_virtual'] else 'selected monitor'}\n")
+    print(f"[OK] Clamp space: {cfg['clamp_space']} "
+          f"({'virtual desktop' if cfg['clamp_space']=='virtual' else ('window client area' if cfg['clamp_space']=='window' else 'selected monitor')})\n")
 
     # State
     pygame.event.clear()
@@ -608,6 +800,10 @@ def main():
     # axis-as-button pressed states (per binding) for hysteresis
     axbtn_prev: Dict[Tuple[str], bool] = {}
 
+    # Window targeting (active handle & rect)
+    active_hwnd: Optional[int] = None
+    active_winrect: Optional[Dict[str,int]] = None
+
     def modifier_is_down():
         if cfg["modifier_button"] is None: return False
         try: return bool(js_mod.get_button(cfg["modifier_button"]))
@@ -633,20 +829,68 @@ def main():
             if cfg["toggle_feedback"] or cfg["debug_io"]:
                 print(f"[MOUSE] {button.upper()} UP")
 
+    def compute_window_target(rect: Dict[str,int]) -> Tuple[int,int]:
+        if cfg["window_x_frac"] is not None and cfg["window_y_frac"] is not None:
+            wx = int(round(rect["x"] + cfg["window_x_frac"] * rect["w"]))
+            wy = int(round(rect["y"] + cfg["window_y_frac"] * rect["h"]))
+            return wx, wy
+        if cfg["window_x"] is not None and cfg["window_y"] is not None:
+            wx = int(rect["x"] + cfg["window_x"])
+            wy = int(rect["y"] + cfg["window_y"])
+            return wx, wy
+        return rect["x"] + rect["w"]//2, rect["y"] + rect["h"]//2
+
     def toggle_on():
         nonlocal active, saved_cursor, last_apply, wiggle_flip, target_x, target_y
+        nonlocal active_hwnd, active_winrect, base_x, base_y
         if active: return
+        # capture cursor for optional restore
         if platform.system().lower() == "windows":
             saved_cursor = get_cursor_pos_virtual()
         else:
             pos = pyautogui.position(); saved_cursor = (int(pos[0]), int(pos[1]))
-        target_x, target_y = base_x, base_y  # recenter on ON
+
+        # Try window targeting (Windows only)
+        active_hwnd = None
+        active_winrect = None
+        if platform.system().lower() == "windows" and (cfg["focus_on_toggle"] or cfg["center_in_window_on_toggle"] or cfg["clamp_space"] == "window"):
+            hwnd = find_window(cfg["focus_window_title"], cfg["focus_window_class"], debug=cfg["debug_window"])
+            if hwnd:
+                if cfg["focus_on_toggle"]:
+                    focus_window(hwnd, cfg["window_restore_if_minimized"], cfg["window_force_foreground"], debug=cfg["debug_window"])
+                    time.sleep(0.05)  # let it settle before reading rect
+                rect = _client_rect_screen(hwnd) or _window_rect_screen(hwnd)
+                if rect:
+                    active_hwnd = hwnd
+                    active_winrect = rect
+                    if cfg["debug_window"]:
+                        print(f"[WIN] client rect: x={rect['x']} y={rect['y']} w={rect['w']} h={rect['h']}")
+                else:
+                    if cfg["debug_window"]:
+                        print("[WIN] Could not read client/window rect.")
+            else:
+                if cfg["debug_window"]:
+                    print("[WIN] No matching window found.")
+
+        # ALWAYS recenter when turning on
+        if (cfg["clamp_space"] == "window" or cfg["center_in_window_on_toggle"]) and active_winrect is not None:
+            bx, by = compute_window_target(active_winrect)
+            base_x, base_y = clamp_target(bx, by, mon, "window", active_winrect)
+        else:
+            if cfg["x_frac"] is not None and cfg["y_frac"] is not None:
+                bx = int(round(mon["x"] + cfg["x_frac"] * mon["w"]))
+                by = int(round(mon["y"] + cfg["y_frac"] * mon["h"]))
+            else:
+                bx = int(mon["x"] + cfg["x"]); by = int(mon["y"] + cfg["y"])
+            base_x, base_y = clamp_target(bx, by, mon, cfg["clamp_space"], active_winrect)
+
+        target_x, target_y = base_x, base_y
         active = True
         if cfg["toggle_feedback"]: print("[TOGGLE] ACTIVE (recentered)")
         apply_cursor(); last_apply = time.monotonic(); wiggle_flip = not wiggle_flip
 
     def toggle_off():
-        nonlocal active, last_apply, wiggle_flip
+        nonlocal active, last_apply, wiggle_flip, active_hwnd, active_winrect
         if not active: return
         active = False
         if cfg["toggle_feedback"]:
@@ -657,6 +901,8 @@ def main():
                 sendinput_move_absolute_virtual(x0, y0)
             else:
                 pyautogui.moveTo(x0, y0)
+        active_hwnd = None
+        active_winrect = None
         last_apply = time.monotonic(); wiggle_flip = False
 
     def get_js_for(b: Binding) -> Optional[pygame.joystick.Joystick]:
@@ -699,7 +945,7 @@ def main():
                             elif name == "dec_y":   hold_dec_y_btn = is_down
                             elif name == "mouse_left":
                                 mouse_btn_pressed["left"] = is_down
-                                mouse_reconcile("left", mouse_btn_pressed["left"] or mouse_axis_pressed["left"])
+                                mouse_reconcile("left", mouse_btn_pressed["left"]  or mouse_axis_pressed["left"])
                             elif name == "mouse_right":
                                 mouse_btn_pressed["right"] = is_down
                                 mouse_reconcile("right", mouse_btn_pressed["right"] or mouse_axis_pressed["right"])
@@ -766,12 +1012,12 @@ def main():
                 js = get_js_for(ax_x)
                 if js is not None and (not ax_x.req_mod or modifier_is_down()):
                     try:
-                        ax = float(js.get_axis(ax_x.axis))
-                        if cfg["axis_invert_x"]: ax = -ax
-                        if abs(ax) < cfg["axis_deadzone_x"]: ax = 0.0
-                        step_x_axis = int(round(ax * cfg["axis_velocity"] * dt))
+                        axv = float(js.get_axis(ax_x.axis))
+                        if cfg["axis_invert_x"]: axv = -axv
+                        if abs(axv) < cfg["axis_deadzone_x"]: axv = 0.0
+                        step_x_axis = int(round(axv * cfg["axis_velocity"] * dt))
                         if cfg["debug_io"] and step_x_axis != 0:
-                            print(f"[AXIS] X dev={ax_x.dev} axis={ax_x.axis} val={ax:+.3f} step={step_x_axis}")
+                            print(f"[AXIS] X dev={ax_x.dev} axis={ax_x.axis} val={axv:+.3f} step={step_x_axis}")
                     except Exception:
                         pass
 
@@ -780,21 +1026,27 @@ def main():
                 js = get_js_for(ax_y)
                 if js is not None and (not ax_y.req_mod or modifier_is_down()):
                     try:
-                        ay = float(js.get_axis(ax_y.axis))
-                        if cfg["axis_invert_y"]: ay = -ay
-                        if abs(ay) < cfg["axis_deadzone_y"]: ay = 0.0
-                        step_y_axis = int(round(ay * cfg["axis_velocity"] * dt))
+                        ayv = float(js.get_axis(ax_y.axis))
+                        if cfg["axis_invert_y"]: ayv = -ayv
+                        if abs(ayv) < cfg["axis_deadzone_y"]: ayv = 0.0
+                        step_y_axis = int(round(ayv * cfg["axis_velocity"] * dt))
                         if cfg["debug_io"] and step_y_axis != 0:
-                            print(f"[AXIS] Y dev={ax_y.dev} axis={ax_y.axis} val={ay:+.3f} step={step_y_axis}")
+                            print(f"[AXIS] Y dev={ax_y.dev} axis={ax_y.axis} val={ayv:+.3f} step={step_y_axis}")
                     except Exception:
                         pass
+
+            # If clamping to window and active, refresh window rect (window may move/resize)
+            if cfg["clamp_space"] == "window" and active and platform.system().lower() == "windows" and active_hwnd:
+                rect = _client_rect_screen(active_hwnd) or _window_rect_screen(active_hwnd)
+                if rect:
+                    active_winrect = rect
 
             # ---------- APPLY MOVEMENT
             step_x = step_x_btn + step_x_axis
             step_y = step_y_btn + step_y_axis
             if step_x != 0 or step_y != 0:
                 target_x += step_x; target_y += step_y
-                target_x, target_y = clamp_target(target_x, target_y, mon, cfg["clamp_virtual"])
+                target_x, target_y = clamp_target(target_x, target_y, mon, cfg["clamp_space"], active_winrect)
                 if cfg["debug_io"]:
                     print(f"[MOVE] dx={step_x:+d} dy={step_y:+d} → target=({target_x},{target_y})")
                 if active:

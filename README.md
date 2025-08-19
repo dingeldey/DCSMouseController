@@ -1,247 +1,177 @@
-# DCS Mouse Controller
+# DCSMouseController — Joystick/Throttle → Mouse
 
-Turn any joystick/throttle into a precise mouse-position controller for sims (e.g., DCS).  
-Windows is fully supported via low-latency **SendInput**; other platforms use `pyautogui`.
+A Windows‑friendly, single‑file Python tool (also available as a compiled `.exe`) that lets you control and **pin** the mouse cursor using one or more game controllers. It supports per‑binding device routing (mix sticks/throttles), a global modifier, analog & “axis‑as‑button” inputs, mouse clicks & wheel, and optional window focusing/centering for sims.
 
-**Highlights**
-- Toggle ON/OFF with a joystick button (1-based indices, Windows-style)
-- Optional **modifier** button to gate actions (append `M` in INI)
-- Position the cursor at a monitor-relative target (fractions or pixels)
-- Move the target with **buttons** (nudges) and/or **axes** (analog)
-- **Per-axis deadzone & invert** for analog movement
-- Map joystick **buttons** or **axis-thresholds** to **left/right click** and **mouse wheel**
-- Clamp movement to the selected monitor or the entire virtual desktop
-- Verbose **debug I/O** logging
+> Ideal for HOTAS/cockpit setups where you want a repeatable cursor position or analog/step nudging inside a specific game window.
 
 ---
 
-## Table of Contents
-- [Download (prebuilt EXE)](#download-prebuilt-exe)
-- [Install (from source)](#install-from-source)
-- [Quick Start](#quick-start)
-- [How It Works](#how-it-works)
-- [Configuration (INI Reference)](#configuration-ini-reference)
-- [Examples](#examples)
-- [Troubleshooting](#troubleshooting)
-- [FAQ](#faq)
-- [License](#license)
+## Highlights
+
+- **Mix multiple controllers, per binding**
+  - Reference a device by **index** (`devIdx:<n>`) or exact **GUID** (`dev:<GUID>`).
+- **Flexible bindings**
+  - Buttons are **1‑based**; axes are **0‑based** (as printed at startup).
+  - Require a held **modifier** by appending `M` **or** `:M` to any binding.
+  - Use **axis values as buttons** (`pos|neg|abs` + threshold + hysteresis).
+  - Use **axes as analog mouse motion** with per‑axis deadzones & invert.
+- **Mouse actions**
+  - Left/right click (press & hold).
+  - Mouse wheel (via buttons or axis thresholds; continuous scrolling while held).
+- **Pin & repeat cursor**
+  - Toggle ON recenters to a base position; while ACTIVE, cursor is periodically re‑applied to keep it “pinned”.
+- **Clamp target area**
+  - `monitor` (selected monitor), `virtual` (whole Windows virtual desktop), or `window` (target window **client** area).
+- **Window targeting (Windows)**
+  - Optionally **focus** a window on toggle‑ON and/or center within its **client** area.
+  - Match by exact **class** (preferred) or by **title substring**.
+  - **Enforced**: if `clamp_space = window`, you **must** set either `focus_window_class` or `focus_window_title`.
+- **Robust on Windows**
+  - Uses `SendInput` for precise, low‑latency moves & clicks.
+  - DPI‑aware and multi‑monitor‑safe client→screen conversions.
+- **Debugging helpers**
+  - Startup prints device indices, GUIDs, and axis counts.
+  - `debug_buttons`, `debug_io`, `debug_window` for live tracing.
 
 ---
 
-## Download (prebuilt EXE)
-Releases include:
-- `DCSMouseController.exe`
-- `joystick_mouse.ini` (template)
-- `README.md` (this file)
+## Download & Run
 
-Just edit the INI and run the EXE.
+- **Compiled**: use the release `DCSMouseController.exe` (no Python needed).
+- **From source**: install Python 3.9+ and:
+  ```bash
+  pip install pygame pyautogui
+  python DCSMouseController.py
+  ```
 
----
-
-## Install (from source)
-
-**Requirements**
-- Python 3.9+
-- `pygame`, `pyautogui`
-
+### Use a different INI
+You can point to a custom configuration file:
 ```bash
-pip install pygame pyautogui
-python DCSMouseController.py
+# EXE
+DCSMouseController.exe --config myprofile.ini
+# or short
+DCSMouseController.exe -c myprofile.ini
+
+# Python
+python DCSMouseController.py --config myprofile.ini
 ```
 
-> Windows users: keep `use_sendinput = true` for the most robust behavior in fullscreen sims.
+By default, the program loads `joystick_mouse.ini` from the same folder.
 
 ---
 
-## Quick Start
+## Binding Syntax (quick reference)
 
-1. **Run the program** (EXE or `python DCSMouseController.py`).
-2. Watch the startup log:
-   - Connected controllers (index, GUID, name)
-   - Button count, **axis count**, hats
-   - **Axis indices (`0..N-1`)** you’ll use in the INI
-   - Available **monitors** and their indices
-3. Edit `joystick_mouse.ini` to match your device and mappings.
-4. Use your `button_toggle` to turn the controller **ACTIVE**. It will **recenter** to your configured target each time.
+You can mix devices **per binding**. Use either `devIdx:<index>` or an exact `dev:<GUID>` as printed at startup.
 
----
+- **Button** (1‑based):  
+  `devIdx:<dev>:button:<btn>[M|:M]` or `dev:<GUID>:button:<btn>[M|:M]`
+- **Axis as button** (thresholded):  
+  `devIdx:<dev>:axis:<axis>:<pos|neg|abs>:<thr>[M|:M]`  
+  `dev:<GUID>:axis:<axis>:<pos|neg|abs>:<thr>[M|:M]`
+- **Analog axis (for X/Y movement)**:  
+  `devIdx:<dev>:axis:<axis>[M|:M]` or `dev:<GUID>:axis:<axis>[M|:M]`
 
-## How It Works
+Append `M` (or `:M`) if that binding should only work while the **global modifier** button is held.
 
-The program maintains a **target mouse position**. While **ACTIVE**, it repeatedly pins the system cursor to that target every `repeat_ms`. You control the target by:
-
-- **Buttons**: continuous **nudges** while held (velocity in `px/s`)
-- **Axes**: **analog movement** (velocity scales with axis deflection)
-- **Clicks & Wheel**: map to joystick **buttons** or **axis-thresholds** (“axis-as-button”)
-
-> **Conventions**  
-> - **Buttons** in the INI are **1-based** (Windows-style).  
-> - **Axes** in the INI are **0-based** (as printed by the program).
+**Note:** Buttons are **1‑based** (Windows style). Axes are **0‑based**.
 
 ---
 
-## Configuration (INI Reference)
-
-All settings live in `joystick_mouse.ini` under the `[input]` section.
+## Example `joystick_mouse.ini`
 
 ```ini
 [input]
-; --- Device selection ---
-device_guid =
-device_index = 0
+; --- Global modifier (advanced) ---
+; Choose device by index or GUID, and the 1-based button number:
+;   modifier = devIdx:1:button:6
+;   modifier = dev:03000000b50700001572000011010000:button:6
+modifier = dev:0:button:1
 
-; Optional separate modifier device (else primary is used)
-modifier_device_guid =
-modifier_device_index =
-modifier_button = 6        ; 1-based! held as a gate for entries marked with 'M'
+; --- Toggle (OFF binding removed; toggle handles both states) ---
+button_toggle = devIdx:1:button:5
 
-; --- Toggle & button nudges (1-based; append 'M' to require modifier) ---
-button_toggle = 5
-button_off    =            ; optional dedicated OFF
+; --- Movement nudges (buttons or axis-thresholds) ---
+button_inc_x = devIdx:0:button:12:M
+button_dec_x = devIdx:0:button:11:M
+button_inc_y = devIdx:0:button:9:M
+button_dec_y = devIdx:0:button:10:M
 
-button_inc_x = 12M         ; hold to nudge right
-button_dec_x = 11M         ; hold to nudge left
-button_inc_y = 9M          ; hold to nudge down
-button_dec_y = 10M         ; hold to nudge up
+nudge_velocity_px_s = 4000
+wiggle_one_pixel = true
 
-nudge_velocity_px_s = 400
-wiggle_one_pixel = true     ; optional 1px wiggle to keep OS from idling the cursor
-
-; --- Axis-based analog movement (0-based; append 'M' to require modifier) ---
-axis_x = 0M
-axis_y = 1M
-axis_deadzone_x = 0.01      ; per-axis deadzone (0..1)
+; --- Analog cursor movement (axes) ---
+axis_x = devIdx:1:axis:0
+axis_y = devIdx:1:axis:1
+axis_deadzone_x = 0.01
 axis_deadzone_y = 0.01
 axis_invert_x = false
 axis_invert_y = false
-axis_velocity_px_s = 800    ; px/s at |axis| = 1.0
+axis_velocity_px_s = 800
+axis_button_hysteresis = 0.10
 
-; --- Mouse buttons via joystick buttons (1-based; optional 'M') ---
-button_mouse_left  = 2
-button_mouse_right = 4
-
-; --- Mouse wheel via buttons (hold to scroll) ---
-button_wheel_up   = 8
-button_wheel_down = 7
+; --- Mouse buttons & wheel ---
+button_mouse_left  = devIdx:0:button:2
+button_mouse_right = devIdx:0:button:4
+button_wheel_up    = devIdx:0:button:8
+button_wheel_down  = devIdx:0:button:7
 wheel_ticks_per_second = 30
 
-; --- Axis-as-button (thresholded) for clicks / wheel (0-based axes) ---
-; Format:  axis:<index>:<pos|neg|abs>:<threshold>[M]
-; Example: axisbtn_mouse_left = axis:2:pos:0.65M   ; press LMB when axis 2 >= +0.65 with modifier
-;          axisbtn_wheel_down = axis:3:neg:0.50    ; hold wheel down when axis 3 <= -0.50
-axisbtn_mouse_left  =
-axisbtn_mouse_right =
-axisbtn_wheel_up    =
-axisbtn_wheel_down  =
-axis_button_hysteresis = 0.10  ; press at thr, release at (thr - hyst) to avoid flicker
-
-; --- Monitor selection & target position ---
-monitor_index = 1            ; printed on startup
-x_frac = 0.5                 ; preferred: fractions within the monitor (0..1)
+; --- Monitor & target (when not centering in a window) ---
+monitor_index = 1
+x_frac = 0.5
 y_frac = 0.5
-; x,y are used only if x_frac/y_frac are omitted
-x = 1280
-y = 720
 
-; --- Timing ---
-repeat_ms = 1000             ; re-apply cursor while ACTIVE
+; Clamp target to: monitor | virtual | window
+; If 'window', you MUST also set either 'focus_window_class' or 'focus_window_title' below.
+clamp_space = monitor
+
+; --- Optional window targeting (Windows only) ---
+focus_on_toggle = true
+focus_window_title = 132-388th-BVR Handbook WIP.docx  ; title substring (case-insensitive)
+focus_window_class =                                  ; exact window class (preferred)
+window_restore_if_minimized = true
+window_force_foreground = true
+
+center_in_window_on_toggle = false
+window_x_frac = 0.5
+window_y_frac = 0.5
+
+; --- Loop/engine ---
+repeat_ms = 3500
 poll_hz = 250
 startup_grace_ms = 200
-
-; --- Windows input path (recommended for sims) ---
 use_sendinput = true
 
-; Clamp space: 'monitor' (selected monitor only) or 'virtual' (all monitors)
-clamp_space = virtual
-
-; --- Logging / behavior ---
+; --- Debug ---
 toggle_feedback = false
 log_apply = false
 debug_buttons = false
-debug_io = false             ; print monitored inputs and generated outputs
-
-; Optional:
-; restore_on_off = false     ; if true, restore the pre-toggle cursor when turning OFF
+debug_io = false
+debug_window = true
 ```
-
-### Axis-as-Button Hysteresis (What `axis_button_hysteresis` Does)
-Adds a buffer so axis-threshold “buttons” don’t chatter near the threshold:
-- **Press (edge-down)** at `thr`
-- **Release (edge-up)** at `thr - hysteresis`  
-Example: `thr=0.60`, `hys=0.10` → press at 0.60, release at 0.50.
 
 ---
 
-## Examples
+## Window Targeting Notes (Windows)
 
-### Ministick for analog movement + LB/RB for clicks
-```ini
-axis_x = 0M
-axis_y = 1M
-axis_deadzone_x = 0.12
-axis_deadzone_y = 0.20
-axis_invert_y = true
-button_mouse_left  = 2
-button_mouse_right = 4
-```
-
-### Axis to mouse wheel (snap steps)
-```ini
-axisbtn_wheel_up   = axis:2:pos:0.60
-axisbtn_wheel_down = axis:2:neg:0.60
-wheel_ticks_per_second = 45
-axis_button_hysteresis = 0.10
-```
-
-### Digital nudges only with modifier
-```ini
-button_inc_x = 20M
-button_dec_x = 22M
-button_inc_y = 21M
-button_dec_y = 19M
-nudge_velocity_px_s = 600
-```
+- **Class vs Title**: prefer `focus_window_class` if you know it—it’s more stable than title text.
+- **Finding class names**: use a small enumerator to print visible windows (or Spy++). The project can also log the chosen window when `debug_window = true`.
+- **Enforcement**: if `clamp_space = window` and neither `focus_window_class` nor `focus_window_title` is set, the program will **abort** with an error to avoid wrong‑screen positioning.
 
 ---
 
 ## Troubleshooting
 
-- **Nothing moves / no input**  
-  - Run the app and check the startup list: are your devices detected?  
-  - Ensure the **right device** is selected (`device_guid` or `device_index`).  
-  - Use `debug_io = true` to see axis values, steps, and outputs.
-
-- **Buttons don’t match numbers**  
-  - INI **buttons are 1-based**. Pygame uses 0-based internally; the app converts for you.
-
-- **Axis moving in the wrong direction**  
-  - Set `axis_invert_x` / `axis_invert_y = true`.
-
-- **Cursor not changing in fullscreen**  
-  - Keep `use_sendinput = true` on Windows.  
-  - Some sims may need you to run the tool **before** launching the sim.
-
-- **Chatter around threshold for axis-as-button**  
-  - Increase `axis_button_hysteresis` or raise the threshold.
-
----
-
-## FAQ
-
-**Q: Do I need admin rights?**  
-A: Typically no. `SendInput` works fine without elevation in most sims.
-
-**Q: Can I combine button nudges and axes?**  
-A: Yes—per frame, the button velocity and axis velocity are **summed**.
-
-**Q: Why does it “recentre” on toggle ON?**  
-A: By design: every ON begins from your INI target anchor (fractions or pixels).
-
-**Q: What is `wiggle_one_pixel` for?**  
-A: Some environments stop updating the cursor if it never changes; a tiny 1px wiggle keeps it “alive”.
+- **Cursor centers on wrong monitor/edge**  
+  Use `clamp_space = window`, verify the chosen window (enable `debug_window = true`), and confirm the **client rect** looks correct in the logs.
+- **Bindings don’t fire with `:M`**  
+  Ensure `modifier = devIdx:…:button:<btn>` (or GUID form) is set and that you’re holding that modifier button.
+- **Which axis/button is which?**  
+  Watch the startup device print for axis counts and indices. Turn on `debug_buttons` / `debug_io` to see live edges/values.
 
 ---
 
 ## License
 
-
+MIT (or your preferred license). Contributions welcome!
