@@ -623,6 +623,7 @@ def load_config(path: str, devices: List[tuple]) -> Dict[str, Any]:
     # --- Enforcement: if clamping to window, you MUST specify a target window ---
     if clamp_space == "window" and (not focus_window_title) and (not focus_window_class):
         print("[ERROR] clamp_space=window requires either 'focus_window_class' or 'focus_window_title' in the INI.")
+        input("Press Enter to exit...")
         sys.exit(1)
 
     return {

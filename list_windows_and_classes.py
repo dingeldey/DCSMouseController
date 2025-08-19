@@ -34,3 +34,4 @@ def enum_cb(hwnd, lParam):
     return True
 
 EnumWindows(EnumWindowsProc(enum_cb), 0)
+input("Press Enter to exit...")
