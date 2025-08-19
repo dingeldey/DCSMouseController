@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Joystick/Throttle → Mouse Position Repeater (multi-device, GUID-aware, modifier, per-monitor, recenter)
+# Joystick/Throttle → Mouse Position Repeater (multi-device, GUID-aware, modifier layer, per-monitor/window, recenter)
 # Windows-friendly (SendInput), pygame-based
 #
 # Highlights:
@@ -8,23 +8,21 @@
 #     devIdx:<index>:axis:<axis>[M|:M]        |   dev:<GUID>:axis:<axis>[M|:M]
 #     devIdx:<index>:axis:<a>:<pos|neg|abs>:<thr>[M|:M]
 #     dev:<GUID>:axis:<a>:<pos|neg|abs>:<thr>[M|:M]
-# - Multiple bindings per button/action (comma-separated lists in INI). Buttons/axis-thresholds act as OR;
-#   multiple analog axes (axis_x/axis_y) add their contributions together.
-# - Explicit modifier definition (advanced only):
-#     modifier = devIdx:<index>:button:<btn>
-#     modifier = dev:<GUID>:button:<btn>
-# - Modifier layer behavior:
-#     - Modifier DOWN  → only bindings with M/:M are active
-#     - Modifier UP    → only bindings without M/:M are active
-#     - No modifier configured → M/:M bindings never activate
-# - No global "primary device" in the INI. (Legacy numeric-only entries default to device 0.)
-# - Dedicated OFF binding removed. Use only `button_toggle` (edge-triggered).
+# - Multiple bindings per action (comma-separated lists in INI):
+#     • Buttons/axis-thresholds are OR’ed
+#     • Analog axes (axis_x/axis_y) add their contributions together
+# - Modifier layer behavior (global modifier button):
+#     • Modifier DOWN  → only bindings with M/:M are active
+#     • Modifier UP    → only bindings without M/:M are active
+#     • No modifier configured → M/:M bindings never activate
+# - Hold-acceleration for button/axis-threshold nudges (time-based ramp)
+# - Unknown GUID devices are gracefully ignored (bindings skipped with a warning).
 # - Optional (Windows-only) window focus + centering/clamping on toggle-ON (see INI).
+# - Dedicated OFF binding removed. Use only `button_toggle` (edge-triggered).
 #
 # Notes:
 # - Buttons in INI are 1-based (Windows style). Axes are 0-based (as printed at startup).
-# - Append M either as a suffix (e.g., ...:button:12M) or as a token (e.g., ...:button:12:M)
-#   to require the global modifier to be held for that binding.
+# - Append M either as a suffix (…:button:12M) or as a token (…:button:12:M) to require the modifier.
 #
 # CLI:
 #   python DCSMouseController.py --config myprofile.ini
@@ -188,8 +186,6 @@ def send_mouse_wheel(ticks: int, *, use_sendinput: bool):
 
 # ---- Window helpers (Windows only) ------------------------------------------
 SW_RESTORE = 9
-VK_MENU = 0x12
-KEYEVENTF_KEYUP = 0x0002
 
 def _get_title(hwnd):
     buf_len = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
@@ -296,9 +292,9 @@ def focus_window(hwnd: int, restore_if_minimized: bool, force_foreground: bool, 
     ok = bool(ctypes.windll.user32.SetForegroundWindow(hwnd))
     if not ok and force_foreground:
         user32 = ctypes.windll.user32
-        user32.keybd_event(0x12, 0, 0, 0)  # ALT down
+        user32.keybd_event(0x12, 0, 0, 0)          # ALT down
         ok = bool(user32.SetForegroundWindow(hwnd))
-        user32.keybd_event(0x12, 0, 0x0002, 0)  # ALT up
+        user32.keybd_event(0x12, 0, 0x0002, 0)     # ALT up
     if debug:
         print(f"[WIN] SetForegroundWindow → {'OK' if ok else 'FAILED'} (hwnd=0x{hwnd:08X})")
     return ok
@@ -419,12 +415,16 @@ def parse_any_binding(s: str, default_dev: int, resolve_dev_token, *,
     if is_dev_tag(parts[0]) and len(parts) >= 4 and parts[2].lower() == "button" and allow_button:
         dev_token = parts[1]
         dev = resolve_dev_token(dev_token)
+        if dev is None:
+            return None  # unknown GUID, skip
         btn_1b = int(parts[3])
         return Binding(kind="button", dev=dev, btn=(btn_1b-1), req_mod=req)
 
     if is_dev_tag(parts[0]) and len(parts) >= 4 and parts[2].lower() == "axis":
         dev_token = parts[1]
         dev = resolve_dev_token(dev_token)
+        if dev is None:
+            return None  # unknown GUID, skip
         if len(parts) == 4 and allow_axis_analog:
             axis = int(parts[3]); return Binding(kind="axis_analog", dev=dev, axis=axis, req_mod=req)
         if len(parts) == 6 and allow_axisbtn:
@@ -518,16 +518,17 @@ def load_config(path: str, devices: List[tuple]) -> Dict[str, Any]:
         if isinstance(guid, str):
             guid_to_index[guid.lower()] = idx
 
-    def resolve_dev_token(token: str) -> int:
-        """Map numeric string → index; otherwise treat as GUID (exact, case-insensitive)."""
+    def resolve_dev_token_optional(token: str) -> Optional[int]:
+        """Map numeric string → index; otherwise GUID → index if known.
+           Unknown GUID → None (binding will be ignored)."""
         t = token.strip()
         if t.lstrip("+-").isdigit():
-            return int(t)
+            return int(t)  # numeric devIdx as-is
         key = t.lower()
         if key in guid_to_index:
             return guid_to_index[key]
-        print(f"[ERROR] Unknown device token '{token}'. Not a number or known GUID.")
-        sys.exit(1)
+        print(f"[WARN] Unknown device GUID '{token}'; binding will be ignored.")
+        return None
 
     # There is no primary device in the INI; default 0 is used only for legacy numeric entries.
     default_device_for_legacy = 0
@@ -541,9 +542,15 @@ def load_config(path: str, devices: List[tuple]) -> Dict[str, Any]:
         modifier_core, _ = _strip_reqmod(modifier_sel)
         parts = [s.strip() for s in modifier_core.split(":")]
         if len(parts) == 4 and parts[2].lower() == "button" and parts[0].lower() in ("dev","devidx","index"):
-            modifier_dev = resolve_dev_token(parts[1])
-            modifier_button_1b = int(parts[3])
-            modifier_button = (modifier_button_1b - 1)
+            dev_opt = resolve_dev_token_optional(parts[1])
+            if dev_opt is None:
+                print(f"[WARN] Modifier device '{parts[1]}' not found; modifier disabled.")
+                modifier_dev = None
+                modifier_button = None
+            else:
+                modifier_dev = dev_opt
+                modifier_button_1b = int(parts[3])
+                modifier_button = (modifier_button_1b - 1)
         else:
             print(f"[ERROR] modifier must be 'devIdx:<dev>:button:<btn>' or 'dev:<GUID>:button:<btn>'. Got '{modifier_sel}'."); sys.exit(1)
 
@@ -552,7 +559,7 @@ def load_config(path: str, devices: List[tuple]) -> Dict[str, Any]:
         return parse_binding_list(
             sec.get(name, "").strip(),
             default_dev=default_device_for_legacy,
-            resolve_dev_token=resolve_dev_token,
+            resolve_dev_token=resolve_dev_token_optional,
             allow_axis_analog=allow_axis_analog,
             allow_axisbtn=allow_axisbtn,
             allow_button=allow_button
@@ -588,6 +595,12 @@ def load_config(path: str, devices: List[tuple]) -> Dict[str, Any]:
     axis_velocity = sec.getint("axis_velocity_px_s", fallback=800)
 
     axis_button_hysteresis = sec.getfloat("axis_button_hysteresis", fallback=0.10)
+
+    # --- Hold-acceleration (buttons/axis-thresholds only) ---
+    hold_accel_enable   = getbool("hold_accel_enable", False)
+    hold_accel_after_ms = sec.getint("hold_accel_after_ms", fallback=400)
+    hold_accel_ramp_ms  = sec.getint("hold_accel_ramp_ms",  fallback=1500)
+    hold_accel_max      = sec.getfloat("hold_accel_max",    fallback=3.0)
 
     monitor_index = sec.getint("monitor_index", fallback=0)
     def f_or_none_pair(k):
@@ -632,7 +645,7 @@ def load_config(path: str, devices: List[tuple]) -> Dict[str, Any]:
     wx_frac = f_or_none("window_x_frac"); wy_frac = f_or_none("window_y_frac")
     wx_px = getint_or_none("window_x");  wy_px = getint_or_none("window_y")
 
-    # --- Enforcement: if clamping to window, you MUST specify a target window ---
+    # Enforcement: if clamping to window, you MUST specify a target window
     if clamp_space == "window" and (not focus_window_title) and (not focus_window_class):
         print("[ERROR] clamp_space=window requires either 'focus_window_class' or 'focus_window_title' in the INI.")
         input("Press Enter to exit...")
@@ -660,6 +673,12 @@ def load_config(path: str, devices: List[tuple]) -> Dict[str, Any]:
         "axis_invert_y": bool(axis_invert_y),
         "axis_velocity": int(axis_velocity),
         "axis_button_hysteresis": float(axis_button_hysteresis),
+
+        # Hold-accel config
+        "hold_accel_enable": bool(hold_accel_enable),
+        "hold_accel_after_ms": int(hold_accel_after_ms),
+        "hold_accel_ramp_ms": int(hold_accel_ramp_ms),
+        "hold_accel_max": float(hold_accel_max),
 
         "monitor_index": int(monitor_index),
         "x_frac": x_frac, "y_frac": y_frac, "x": x_px, "y": y_px,
@@ -818,7 +837,10 @@ def main():
     btn_hold_state: Dict[Tuple[str,int], bool] = {}
     axbtn_prev: Dict[Tuple[str,int], bool] = {}  # previous pressed states for axis-as-button
 
-    # Mouse and wheel aggregate states
+    # Hold-accel timers (per direction)
+    hold_started_at: Dict[str, Optional[float]] = {"inc_x": None, "dec_x": None, "inc_y": None, "dec_y": None}
+
+    # Mouse & wheel
     wheel_accum = 0.0
 
     # Window targeting (active handle & rect)
@@ -968,21 +990,7 @@ def main():
                                     if is_down and not toggled_this_event and (now - last_toggle) >= debounce_s:
                                         (toggle_off() if active else toggle_on()); last_toggle = now
                                         toggled_this_event = True
-                                elif name == "inc_x":
-                                    btn_hold_state[(name, i)] = is_down
-                                elif name == "dec_x":
-                                    btn_hold_state[(name, i)] = is_down
-                                elif name == "inc_y":
-                                    btn_hold_state[(name, i)] = is_down
-                                elif name == "dec_y":
-                                    btn_hold_state[(name, i)] = is_down
-                                elif name == "mouse_left":
-                                    btn_hold_state[(name, i)] = is_down
-                                elif name == "mouse_right":
-                                    btn_hold_state[(name, i)] = is_down
-                                elif name == "wheel_up":
-                                    btn_hold_state[(name, i)] = is_down
-                                elif name == "wheel_down":
+                                else:
                                     btn_hold_state[(name, i)] = is_down
 
                 elif event.type == pygame.JOYDEVICEREMOVED:
@@ -1050,13 +1058,52 @@ def main():
             wheel_btn_up   = any_btn("wheel_up")
             wheel_btn_down = any_btn("wheel_down")
 
-            # ---------- BUTTON-BASED MOVEMENT
-            vx = (1 if (hold_inc_x_btn or hold_inc_x_axb) else 0) - (1 if (hold_dec_x_btn or hold_dec_x_axb) else 0)
-            vy = (1 if (hold_inc_y_btn or hold_inc_y_axb) else 0) - (1 if (hold_dec_y_btn or hold_dec_y_axb) else 0)
-            step_x_btn = int(round(vx * cfg["nudge_velocity"] * dt))
-            step_y_btn = int(round(vy * cfg["nudge_velocity"] * dt))
+            # ---------- Combined hold flags (button OR axis-threshold)
+            hold_flags = {
+                "inc_x": (hold_inc_x_btn or hold_inc_x_axb),
+                "dec_x": (hold_dec_x_btn or hold_dec_x_axb),
+                "inc_y": (hold_inc_y_btn or hold_inc_y_axb),
+                "dec_y": (hold_dec_y_btn or hold_dec_y_axb),
+            }
 
-            # ---------- AXIS-BASED MOVEMENT (analog) — sum contributions
+            # Update hold timers for acceleration
+            for key, held in hold_flags.items():
+                if held:
+                    if hold_started_at[key] is None:
+                        hold_started_at[key] = now
+                else:
+                    hold_started_at[key] = None
+
+            # Helper to compute accel multiplier for a given direction key
+            def accel_mult_for(key: str) -> float:
+                if not cfg["hold_accel_enable"]:
+                    return 1.0
+                t0 = hold_started_at.get(key)
+                if t0 is None:
+                    return 1.0
+                ms = (now - t0) * 1000.0
+                if ms <= cfg["hold_accel_after_ms"]:
+                    return 1.0
+                ramp_ms = max(1.0, float(cfg["hold_accel_ramp_ms"]))
+                prog = min(1.0, (ms - cfg["hold_accel_after_ms"]) / ramp_ms)
+                return 1.0 + (cfg["hold_accel_max"] - 1.0) * prog
+
+            # ---------- BUTTON-BASED MOVEMENT with acceleration
+            vx = (1 if hold_flags["inc_x"] else 0) - (1 if hold_flags["dec_x"] else 0)
+            vy = (1 if hold_flags["inc_y"] else 0) - (1 if hold_flags["dec_y"] else 0)
+
+            mult_x = 1.0
+            if vx > 0:   mult_x = accel_mult_for("inc_x")
+            elif vx < 0: mult_x = accel_mult_for("dec_x")
+
+            mult_y = 1.0
+            if vy > 0:   mult_y = accel_mult_for("inc_y")
+            elif vy < 0: mult_y = accel_mult_for("dec_y")
+
+            step_x_btn = int(round(vx * cfg["nudge_velocity"] * mult_x * dt))
+            step_y_btn = int(round(vy * cfg["nudge_velocity"] * mult_y * dt))
+
+            # ---------- AXIS-BASED MOVEMENT (analog) — sum contributions (no accel)
             step_x_axis = 0
             step_y_axis = 0
 
