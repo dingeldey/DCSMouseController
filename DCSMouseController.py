@@ -2,6 +2,11 @@
 # Joystick/Throttle → Mouse Position Repeater (multi-device, GUID-aware, modifier layer, per-monitor/window, recenter)
 # Windows-friendly (SendInput), pygame-based
 #
+# Now with keyboard mappings from button/axis-threshold bindings:
+#   key_map = <binding> => <combo>[, <binding> => <combo>, ...]
+#     • <binding> is the same syntax you use elsewhere (button or axis:pos|neg|abs:thr), supports :M
+#     • <combo> like: A, F1, Ctrl+F1, Shift+Tab, Alt+Enter, Win+D, etc.
+#
 # Highlights:
 # - Per-binding device selection to mix multiple controllers:
 #     devIdx:<index>:button:<btn>[M|:M]       |   dev:<GUID>:button:<btn>[M|:M]
@@ -20,16 +25,11 @@
 # - Optional (Windows-only) window focus + centering/clamping on toggle-ON (see INI).
 # - Dedicated OFF binding removed. Use only `button_toggle` (edge-triggered).
 #
-# Notes:
-# - Buttons in INI are 1-based (Windows style). Axes are 0-based (as printed at startup).
-# - Append M either as a suffix (…:button:12M) or as a token (…:button:12:M) to require the modifier.
-#
 # CLI:
 #   python DCSMouseController.py --config myprofile.ini
 #   DCSMouseController.exe -c myprofile.ini
 #
 # Requires: pygame, pyautogui
-#   pip install pygame pyautogui
 
 import sys
 import time
@@ -121,13 +121,13 @@ def get_cursor_pos_virtual():
     pt = POINT(); ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
     return int(pt.x), int(pt.y)
 
-# SendInput structures
+# SendInput structures (mouse)
 class _MOUSEINPUT(ctypes.Structure):
     _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long),
                 ("mouseData", ctypes.c_uint), ("dwFlags", ctypes.c_uint),
                 ("time", ctypes.c_uint), ("dwExtraInfo", ctypes.c_void_p)]
 
-class _INPUT(ctypes.Structure):
+class _INPUT_MOUSE(ctypes.Structure):
     _fields_ = [("type", ctypes.c_uint), ("mi", _MOUSEINPUT)]
 
 MOUSEEVENTF_MOVE = 0x0001
@@ -144,7 +144,7 @@ def sendinput_move_absolute_virtual(x_px, y_px):
     vx, vy, vw, vh = win_virtual_desktop_rect()
     nx = int(round((x_px - vx) * 65535 / max(1, vw - 1)))
     ny = int(round((y_px - vy) * 65535 / max(1, vh - 1)))
-    inp = _INPUT()
+    inp = _INPUT_MOUSE()
     inp.type = 0
     inp.mi = _MOUSEINPUT(nx, ny, 0, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, 0, None)
     ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
@@ -158,7 +158,7 @@ def send_mouse_button(button: str, down: bool, *, use_sendinput: bool):
             flags = MOUSEEVENTF_RIGHTDOWN if down else MOUSEEVENTF_RIGHTUP
         else:
             return
-        inp = _INPUT()
+        inp = _INPUT_MOUSE()
         inp.type = 0
         inp.mi = _MOUSEINPUT(0, 0, 0, flags, 0, None)
         ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
@@ -174,7 +174,7 @@ def send_mouse_wheel(ticks: int, *, use_sendinput: bool):
         return
     if platform.system().lower() == "windows" and use_sendinput:
         delta = int(ticks) * WHEEL_DELTA
-        inp = _INPUT()
+        inp = _INPUT_MOUSE()
         inp.type = 0
         inp.mi = _MOUSEINPUT(0, 0, delta, MOUSEEVENTF_WHEEL, 0, None)
         ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
@@ -183,6 +183,54 @@ def send_mouse_wheel(ticks: int, *, use_sendinput: bool):
             pyautogui.scroll(int(ticks))
         except Exception:
             pass
+
+# ---- Keyboard helpers (Windows SendInput; pyautogui fallback) ---------------
+KEYEVENTF_KEYUP = 0x0002
+
+VK = {
+    # Modifiers & common
+    "SHIFT": 0x10, "CTRL": 0x11, "CONTROL": 0x11, "ALT": 0x12,
+    "WIN": 0x5B, "LWIN": 0x5B, "RWIN": 0x5C,
+    "TAB": 0x09, "ENTER": 0x0D, "RETURN": 0x0D, "ESC": 0x1B, "ESCAPE": 0x1B,
+    "SPACE": 0x20, "BACKSPACE": 0x08, "CAPSLOCK": 0x14,
+
+    # Arrows & nav
+    "UP": 0x26, "DOWN": 0x28, "LEFT": 0x25, "RIGHT": 0x27,
+    "HOME": 0x24, "END": 0x23, "PAGEUP": 0x21, "PAGEDOWN": 0x22,
+    "INSERT": 0x2D, "DELETE": 0x2E,
+}
+for i in range(10):
+    VK[str(i)] = 0x30 + i
+for i, ch in enumerate("ABCDEFGHIJKLMNOPQRSTUVWXYZ"):
+    VK[ch] = 0x41 + i
+for i in range(1, 25):
+    VK[f"F{i}"] = 0x70 + (i - 1)
+
+def _token_to_vk(token: str) -> Optional[int]:
+    t = token.strip().upper()
+    return VK.get(t, None)
+
+def _send_key_token(token: str, down: bool, *, use_sendinput: bool):
+    if platform.system().lower() == "windows" and use_sendinput:
+        vk = _token_to_vk(token)
+        if vk is None:
+            return
+        ctypes.windll.user32.keybd_event(ctypes.c_ubyte(vk), 0, 0 if down else KEYEVENTF_KEYUP, 0)
+    else:
+        name = token.strip().lower()
+        try:
+            if down: pyautogui.keyDown(name)
+            else:    pyautogui.keyUp(name)
+        except Exception:
+            pass
+
+def send_key_combo(tokens: List[str], down: bool, *, use_sendinput: bool, debug: bool=False):
+    if down:
+        for t in tokens:
+            _send_key_token(t, True, use_sendinput=use_sendinput)
+    else:
+        for t in reversed(tokens):
+            _send_key_token(t, False, use_sendinput=use_sendinput)
 
 # ---- Window helpers (Windows only) ------------------------------------------
 SW_RESTORE = 9
@@ -356,6 +404,11 @@ class Binding:
     thr: Optional[float] = None
     req_mod: bool = False
 
+@dataclass
+class KeyMapEntry:
+    binding: Binding
+    tokens: List[str]   # e.g., ["CTRL","F1"] or ["A"]
+
 def _strip_reqmod(s: str) -> Tuple[str, bool]:
     """Accepts suffix 'M' or token ':M' (case-insensitive)."""
     s = s.strip()
@@ -369,9 +422,6 @@ def _strip_reqmod(s: str) -> Tuple[str, bool]:
     return s, False
 
 def parse_legacy_button_or_axis(value: str, default_dev: int, *, expect_axis_analog: bool=False) -> Optional[Binding]:
-    # Legacy formats:
-    #   - buttons: '12' or '12M' or '12:M'  (1-based button index on default device)
-    #   - axis_x/axis_y: '0' or '0M' or '0:M' (0-based axis index on default device)
     if not value.strip():
         return None
     core, req = _strip_reqmod(value)
@@ -382,19 +432,11 @@ def parse_legacy_button_or_axis(value: str, default_dev: int, *, expect_axis_ana
         if expect_axis_analog:
             return Binding(kind="axis_analog", dev=default_dev, axis=n, req_mod=req)
         else:
-            return Binding(kind="button", dev=default_dev, btn=(n-1), req_mod=req)  # 1-based → 0-based
+            return Binding(kind="button", dev=default_dev, btn=(n-1), req_mod=req)
     return None
 
 def parse_any_binding(s: str, default_dev: int, resolve_dev_token, *,
                       allow_axis_analog: bool=True, allow_axisbtn: bool=True, allow_button: bool=True) -> Optional[Binding]:
-    """
-    Extended formats (device can be index or GUID):
-      devIdx:<dev>:button:<btn>[M|:M]     |   dev:<GUID>:button:<btn>[M|:M]
-      devIdx:<dev>:axis:<axis>[M|:M]      |   dev:<GUID>:axis:<axis>[M|:M]
-      devIdx:<dev>:axis:<axis>:<pos|neg|abs>:<thr>[M|:M]
-      dev:<GUID>:axis:<axis>:<pos|neg|abs>:<thr>[M|:M]
-    Plus legacy fallback (see parse_legacy_button_or_axis).
-    """
     s = s.strip()
     if not s:
         return None
@@ -441,10 +483,6 @@ def parse_any_binding(s: str, default_dev: int, resolve_dev_token, *,
 
 def parse_binding_list(raw: str, default_dev: int, resolve_dev_token, *,
                        allow_axis_analog: bool, allow_axisbtn: bool, allow_button: bool) -> List[Binding]:
-    """
-    Accept a comma-separated list of bindings. Whitespace is ignored around commas.
-    Empty input → empty list.
-    """
     raw = (raw or "").strip()
     if not raw:
         return []
@@ -456,6 +494,40 @@ def parse_binding_list(raw: str, default_dev: int, resolve_dev_token, *,
         if b is not None:
             result.append(b)
     return result
+
+def parse_key_map_list(raw: str, default_dev: int, resolve_dev_token) -> List[KeyMapEntry]:
+    """
+    Accepts comma- or newline-separated entries:
+      key_map = <binding> => A, \
+                dev:<GUID>:axis:2:pos:0.60:M => Ctrl+F1,
+                devIdx:1:button:5 => Alt+Tab
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return []
+    raw = raw.replace("\\\n", " ").replace("\\\r\n", " ")
+
+    chunks: List[str] = []
+    for part in raw.split(","):
+        chunks.extend(line.strip() for line in part.splitlines() if line.strip())
+
+    entries: List[KeyMapEntry] = []
+    for item in chunks:
+        if "=>" not in item:
+            print(f"[WARN] key_map entry missing '=>': {item}")
+            continue
+        lhs, rhs = item.split("=>", 1)
+        lhs = lhs.strip(); rhs = rhs.strip()
+        b = parse_any_binding(lhs, default_dev, resolve_dev_token, allow_axis_analog=False, allow_axisbtn=True, allow_button=True)
+        if b is None:
+            continue
+        tokens = [tok.strip() for tok in rhs.replace(" ", "").split("+") if tok.strip()]
+        valid = [t for t in tokens if (_token_to_vk(t) is not None or platform.system().lower() != "windows")]
+        if len(valid) != len(tokens):
+            bad = [t for t in tokens if _token_to_vk(t) is None]
+            print(f"[WARN] Unknown key tokens {bad} in key_map '{item}'. Entry kept; may work via pyautogui fallback.")
+        entries.append(KeyMapEntry(binding=b, tokens=tokens))
+    return entries
 
 # ---------- Axis-as-button helper --------------------------------------------
 
@@ -490,9 +562,6 @@ def axis_to_button(js, axis_index, *, direction="pos", threshold=0.6,
 # ---------- Config loading ----------------------------------------------------
 
 def load_config(path: str, devices: List[tuple]) -> Dict[str, Any]:
-    """
-    devices: list of tuples (index, name, guid, buttons, instance_id) from list_devices()
-    """
     p = Path(path).expanduser()
     if not p.exists():
         print(f"[ERROR] Config file '{p}' not found."); sys.exit(1)
@@ -538,7 +607,6 @@ def load_config(path: str, devices: List[tuple]) -> Dict[str, Any]:
     modifier_dev = None
     modifier_button = None
     if modifier_sel:
-        # Allow and ignore a trailing M / :M on the modifier line
         modifier_core, _ = _strip_reqmod(modifier_sel)
         parts = [s.strip() for s in modifier_core.split(":")]
         if len(parts) == 4 and parts[2].lower() == "button" and parts[0].lower() in ("dev","devidx","index"):
@@ -645,6 +713,10 @@ def load_config(path: str, devices: List[tuple]) -> Dict[str, Any]:
     wx_frac = f_or_none("window_x_frac"); wy_frac = f_or_none("window_y_frac")
     wx_px = getint_or_none("window_x");  wy_px = getint_or_none("window_y")
 
+    # --- Keyboard mappings ---
+    key_map_raw = sec.get("key_map", fallback="").strip()
+    key_maps: List[KeyMapEntry] = parse_key_map_list(key_map_raw, default_device_for_legacy, resolve_dev_token_optional)
+
     # Enforcement: if clamping to window, you MUST specify a target window
     if clamp_space == "window" and (not focus_window_title) and (not focus_window_class):
         print("[ERROR] clamp_space=window requires either 'focus_window_class' or 'focus_window_title' in the INI.")
@@ -666,6 +738,8 @@ def load_config(path: str, devices: List[tuple]) -> Dict[str, Any]:
             "axis_x": lst_ax_x,
             "axis_y": lst_ax_y,
         },
+
+        "key_maps": key_maps,
 
         "axis_deadzone_x": float(axis_deadzone_x),
         "axis_deadzone_y": float(axis_deadzone_y),
@@ -773,6 +847,10 @@ def main():
         for b in blist:
             if isinstance(b, Binding):
                 used_devs.add(b.dev)
+    # include key_map devices
+    for km in cfg.get("key_maps", []):
+        used_devs.add(km.binding.dev)
+
     if cfg["modifier_button"] is not None and cfg["modifier_dev"] is not None:
         used_devs.add(cfg["modifier_dev"])
 
@@ -837,11 +915,11 @@ def main():
     btn_hold_state: Dict[Tuple[str,int], bool] = {}
     axbtn_prev: Dict[Tuple[str,int], bool] = {}  # previous pressed states for axis-as-button
 
-    # Hold-accel timers (per direction)
-    hold_started_at: Dict[str, Optional[float]] = {"inc_x": None, "dec_x": None, "inc_y": None, "dec_y": None}
-
-    # Mouse & wheel
-    wheel_accum = 0.0
+    # --- Keyboard map states
+    keymap_btn_state: List[bool] = []         # only for button-kind keymaps
+    keymap_ax_prev: List[bool] = []           # prev-pressed for axisbtn keymaps
+    keymap_prev_active: List[bool] = []       # last applied (for edge detection)
+    keymaps: List[KeyMapEntry] = cfg.get("key_maps", [])
 
     # Window targeting (active handle & rect)
     active_hwnd: Optional[int] = None
@@ -854,6 +932,19 @@ def main():
                 btn_hold_state[(name, i)] = False
             elif b.kind == "axisbtn":
                 axbtn_prev[(name, i)] = False
+
+    # init keymap states
+    for km in keymaps:
+        if km.binding.kind == "button":
+            keymap_btn_state.append(False)
+            keymap_ax_prev.append(False)  # placeholder
+        elif km.binding.kind == "axisbtn":
+            keymap_btn_state.append(False)  # placeholder
+            keymap_ax_prev.append(False)
+        else:
+            keymap_btn_state.append(False)
+            keymap_ax_prev.append(False)
+        keymap_prev_active.append(False)
 
     def apply_cursor():
         x = target_x + (1 if (cfg["wiggle_one_pixel"] and wiggle_flip) else 0)
@@ -993,6 +1084,14 @@ def main():
                                 else:
                                     btn_hold_state[(name, i)] = is_down
 
+                    # Also update key_map button entries
+                    for km_i, km in enumerate(keymaps):
+                        b = km.binding
+                        if b.kind != "button":
+                            continue
+                        if b.dev == dev_idx and hasattr(event, "button") and (event.button == b.btn):
+                            keymap_btn_state[km_i] = is_down if binding_active(b) else False
+
                 elif event.type == pygame.JOYDEVICEREMOVED:
                     ev_dev_id = getattr(event, "instance_id", None)
                     dev_idx = inst_to_idx.get(ev_dev_id, None)
@@ -1041,6 +1140,22 @@ def main():
             wheel_axis_up   = poll_axbtn_any("wheel_up")
             wheel_axis_down = poll_axbtn_any("wheel_down")
 
+            # Poll key_map axisbtn entries
+            for km_i, km in enumerate(keymaps):
+                b = km.binding
+                if b.kind != "axisbtn":
+                    continue
+                if not binding_active(b):
+                    keymap_ax_prev[km_i] = False
+                    continue
+                js = get_js_for(b)
+                if js is None:
+                    continue
+                prev_p = keymap_ax_prev[km_i]
+                pressed, ed, eu, val = axis_to_button(js, b.axis, direction=b.dir, threshold=b.thr,
+                                                      hysteresis=hys, prev_pressed=prev_p)
+                keymap_ax_prev[km_i] = pressed
+
             # ---------- Aggregate button-hold states per action
             def any_btn(name: str) -> bool:
                 return any(btn_hold_state.get((name, i), False)
@@ -1067,14 +1182,15 @@ def main():
             }
 
             # Update hold timers for acceleration
+            hold_started_at: Dict[str, Optional[float]] = getattr(main, "_hold_started_at", {"inc_x": None, "dec_x": None, "inc_y": None, "dec_y": None})
             for key, held in hold_flags.items():
                 if held:
                     if hold_started_at[key] is None:
                         hold_started_at[key] = now
                 else:
                     hold_started_at[key] = None
+            setattr(main, "_hold_started_at", hold_started_at)
 
-            # Helper to compute accel multiplier for a given direction key
             def accel_mult_for(key: str) -> float:
                 if not cfg["hold_accel_enable"]:
                     return 1.0
@@ -1167,6 +1283,7 @@ def main():
             if wheel_btn_up or wheel_axis_up:     net_rate += cfg["wheel_rate"]
             if wheel_btn_down or wheel_axis_down: net_rate -= cfg["wheel_rate"]
             if net_rate != 0.0:
+                wheel_accum = getattr(main, "_wheel_accum", 0.0)
                 wheel_accum += net_rate * dt
                 ticks = int(wheel_accum)
                 if ticks != 0:
@@ -1174,6 +1291,27 @@ def main():
                     if cfg["debug_io"]:
                         print(f"[WHEEL] ticks={ticks} (accum={wheel_accum:.2f})")
                     wheel_accum -= ticks
+                setattr(main, "_wheel_accum", wheel_accum)
+
+            # ---------- KEY MAP application (edge-based)
+            for km_i, km in enumerate(keymaps):
+                b = km.binding
+                if not binding_active(b):
+                    pressed = False
+                else:
+                    if b.kind == "button":
+                        pressed = keymap_btn_state[km_i]
+                    elif b.kind == "axisbtn":
+                        pressed = keymap_ax_prev[km_i]
+                    else:
+                        pressed = False
+                prev = keymap_prev_active[km_i]
+                if pressed != prev:
+                    send_key_combo(km.tokens, pressed, use_sendinput=cfg["use_sendinput"])
+                    keymap_prev_active[km_i] = pressed
+                    if cfg["debug_io"]:
+                        desc = f"btn={b.btn+1}" if b.kind=="button" else f"axis={b.axis}:{b.dir}:{b.thr:.2f}"
+                        print(f"[KEYMAP] {'DOWN' if pressed else 'UP  '} #{km_i} tokens={'+'.join(km.tokens)} ({b.kind} dev={b.dev} {desc})")
 
             # ---------- Periodic re-apply
             if active and (now - last_apply) >= repeat_interval:
@@ -1187,6 +1325,10 @@ def main():
     except KeyboardInterrupt:
         print("\n[EXIT] User aborted.")
     finally:
+        # Make sure any held key combos are released on exit
+        for km_i, km in enumerate(cfg.get("key_maps", [])):
+            if keymap_prev_active and km_i < len(keymap_prev_active) and keymap_prev_active[km_i]:
+                send_key_combo(km.tokens, False, use_sendinput=cfg["use_sendinput"])
         pygame.joystick.quit(); pygame.quit()
 
 if __name__ == "__main__":
