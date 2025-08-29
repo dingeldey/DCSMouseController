@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 executor.py - Executes actions for input events. Supports:
-- key presses
-- mouse button clicks
+- key presses (single / hold)
+- mouse button clicks (single / hold)
 - hold-to-scroll mouse wheel with acceleration
 - mouse movement from analog axes (relative/absolute)
 - centering mouse on window/monitor/virtual screen
@@ -41,17 +41,18 @@ class InputExecutor:
 
         # increment state (per-binding)
         self.increment_state = {}
-
+        self.key_toggle_state = {}
+        self.key_toggle_repeat = {}   # tracks repeat timing for toggled keys
     # ---------------------------------------------------------------
     # Event handling
     # ---------------------------------------------------------------
     def handle_event(self, event):
         ib = event.binding.input
         for out in event.binding.outputs:
-            if out.type == "key" and event.pressed:
-                self._exec_key(out)
+            if out.type == "key":
+                self._exec_key(out, event)
 
-            elif out.type == "mouse_button" and event.pressed:
+            elif out.type == "mouse_button":
                 self._exec_button(out, event)
 
             elif out.type == "mouse_wheel":
@@ -83,20 +84,72 @@ class InputExecutor:
         self._update_wheels()
         self._update_wiggle()
         self._update_increments()
+        self._update_key_toggles()
 
     # ---------------------------------------------------------------
     # Keys / Buttons
     # ---------------------------------------------------------------
-    def _exec_key(self, out):
-        if self.input_cfg.debug_inputs or self.input_cfg.log_buttons:
-            self.log.info(f"[KEY] {out.value}")
-        self.keymapper.send_key(out.value)
+    def _exec_key(self, out, event):
+        if out.mode == "single":
+            if event.pressed:
+                if self.input_cfg.debug_inputs or self.input_cfg.log_buttons:
+                    self.log.info(f"[KEY] {out.value} TAP")
+                self.keymapper.tap(out.value)
+
+        elif out.mode == "hold":
+            if event.pressed:
+                if self.input_cfg.debug_inputs or self.input_cfg.log_buttons:
+                    self.log.info(f"[KEY] {out.value} DOWN")
+                self.keymapper.key_down(out.value)
+            else:
+                if self.input_cfg.debug_inputs or self.input_cfg.log_buttons:
+                    self.log.info(f"[KEY] {out.value} UP")
+                self.keymapper.key_up(out.value)
+        elif out.mode == "toggle":
+            if event.pressed:
+                key_id = (
+                    out.type,
+                    out.value,
+                    event.binding.input.device_guid,
+                    event.binding.input.input_id,
+                )
+                state = self.key_toggle_state.get(key_id, False)
+                if state:
+                    # turn OFF
+                    self.keymapper.key_up(out.value)
+                    self.key_toggle_state[key_id] = False
+                    self.key_toggle_repeat.pop(key_id, None)
+                    if self.input_cfg.debug_inputs or self.input_cfg.log_buttons:
+                        self.log.info(f"[KEY] {out.value} TOGGLE OFF")
+                else:
+                    # turn ON
+                    self.keymapper.key_down(out.value)  # optional: initial down
+                    self.key_toggle_state[key_id] = True
+                    self.key_toggle_repeat[key_id] = time.time()
+                    if self.input_cfg.debug_inputs or self.input_cfg.log_buttons:
+                        self.log.info(f"[KEY] {out.value} TOGGLE ON")
+
 
     def _exec_button(self, out, event):
-        if event.pressed:
-            if self.input_cfg.debug_inputs or self.input_cfg.log_buttons:
-                self.log.info(f"[BUTTON] Mouse {out.value} pressed")
-            self.mousecontroller.click(out.value)
+        hold_ms = 30
+        if out.extra and "hold_ms" in out.extra:
+            hold_ms = out.extra["hold_ms"]
+
+        if out.mode == "single":
+            if event.pressed:
+                if self.input_cfg.debug_inputs or self.input_cfg.log_buttons:
+                    self.log.info(f"[BUTTON] Mouse {out.value} CLICK ({hold_ms} ms)")
+                self.mousecontroller.click(out.value, hold_ms=hold_ms)
+
+        elif out.mode == "hold":
+            if event.pressed:
+                if self.input_cfg.debug_inputs or self.input_cfg.log_buttons:
+                    self.log.info(f"[BUTTON] Mouse {out.value} DOWN")
+                self.mousecontroller.button_down(out.value)
+            else:
+                if self.input_cfg.debug_inputs or self.input_cfg.log_buttons:
+                    self.log.info(f"[BUTTON] Mouse {out.value} UP")
+                self.mousecontroller.button_up(out.value)
 
     # ---------------------------------------------------------------
     # Wheel hold-to-scroll
@@ -117,6 +170,17 @@ class InputExecutor:
             if self.input_cfg.debug_inputs:
                 self.log.info(f"[INPUT] wheel {key[-1]} STOP")
             del self.wheel_state[key]
+
+    def _update_key_toggles(self):
+        if not self.key_toggle_repeat:
+            return
+        now = time.time()
+        for key_id in list(self.key_toggle_repeat.keys()):
+            out_value = key_id[1]  # the actual key string
+            last_time = self.key_toggle_repeat[key_id]
+            if now - last_time >= 0.05:  # repeat every 50 ms
+                self.keymapper.tap(out_value)  # send down+up
+                self.key_toggle_repeat[key_id] = now
 
     def _update_wheels(self):
         if not self.wheel_state:
@@ -209,17 +273,15 @@ class InputExecutor:
         tval  = out.extra.get("target_val")
         pos   = out.extra.get("position")
 
-        # Default: center
         fx, fy = None, None
         px, py = None, None
 
         if pos:
             if pos[0] == "frac":
-                fx, fy = pos[1]  # tuple (x,y)
+                fx, fy = pos[1]
             elif pos[0] == "px":
-                px, py = pos[1]  # tuple (x,y)
+                px, py = pos[1]
 
-        # fallback only if nothing was parsed
         if fx is None and px is None:
             fx, fy = 0.5, 0.5
 
@@ -228,8 +290,6 @@ class InputExecutor:
                 self.mousecontroller.set_position_pixels(px, py)
             else:
                 self.mousecontroller.set_position_frac(fx, fy)
-            if self.input_cfg.debug_inputs:
-                self.log.info(f"[CENTER] Virtual ({'px' if px else 'frac'}) {px or fx}, {py or fy}")
 
         elif ttype == "Monitor":
             idx = int(tval) if tval and str(tval).isdigit() else 0
@@ -237,25 +297,18 @@ class InputExecutor:
                 self.mousecontroller.set_position_monitor_px(idx, px, py)
             else:
                 self.mousecontroller.set_position_monitor_frac(idx, fx, fy)
-            if self.input_cfg.debug_inputs:
-                self.log.info(f"[CENTER] Monitor {idx} ({'px' if px else 'frac'}) {px or fx}, {py or fy}")
 
         elif ttype == "WindowClass":
             if px is not None:
                 self.mousecontroller.set_position_window_px(class_name=tval, x=px, y=py)
             else:
                 self.mousecontroller.set_position_window_frac(class_name=tval, fx=fx, fy=fy)
-            if self.input_cfg.debug_inputs:
-                self.log.info(f"[CENTER] WindowClass {tval} ({'px' if px else 'frac'}) {px or fx}, {py or fy}")
 
         elif ttype == "WindowName":
             if px is not None:
                 self.mousecontroller.set_position_window_px(title=tval, x=px, y=py)
             else:
                 self.mousecontroller.set_position_window_frac(title=tval, fx=fx, fy=fy)
-            if self.input_cfg.debug_inputs:
-                self.log.info(f"[CENTER] WindowName {tval} ({'px' if px else 'frac'}) {px or fx}, {py or fy}")
-
 
     # ---------------------------------------------------------------
     # FocusWindow
@@ -275,8 +328,6 @@ class InputExecutor:
                 user32.keybd_event(0x12, 0, 0, 0)   # ALT down
                 user32.keybd_event(0x12, 0, 2, 0)   # ALT up
                 user32.SetForegroundWindow(hwnd)
-            if self.input_cfg.debug_inputs:
-                self.log.info(f"[FOCUS] Brought window {tval} to foreground")
 
     # ---------------------------------------------------------------
     # Wiggle
@@ -287,8 +338,6 @@ class InputExecutor:
             self.wiggle_mode = out.extra.get("wiggle_mode", "relative")
             self.wiggle_px = out.extra.get("wiggle_px", 5)
             self.wiggle_ms = out.extra.get("wiggle_ms", 1000)
-        if self.input_cfg.debug_inputs:
-            self.log.info(f"[WIGGLE] {'ON' if self.wiggle_active else 'OFF'}")
 
     def _update_wiggle(self):
         if not self.wiggle_active:
@@ -303,8 +352,6 @@ class InputExecutor:
                 user32.GetCursorPos(ctypes.byref(pt))
                 self.mousecontroller.set_position_pixels(pt.x + dx, pt.y)
             self.last_wiggle = now
-            if self.input_cfg.debug_inputs:
-                self.log.info(f"[WIGGLE] step {dx}")
 
     # ---------------------------------------------------------------
     # MouseInc / MouseDec
@@ -317,14 +364,10 @@ class InputExecutor:
         self.increment_state[self._inc_key(ib, out)] = {
             "start": now, "last": now, "out": out
         }
-        if self.input_cfg.debug_inputs:
-            self.log.info(f"[INC] {out.value} START")
 
     def _stop_increment(self, ib, out):
         key = self._inc_key(ib, out)
         if key in self.increment_state:
-            if self.input_cfg.debug_inputs:
-                self.log.info(f"[INC] {out.value} STOP")
             del self.increment_state[key]
 
     def _update_increments(self):
@@ -364,6 +407,4 @@ class InputExecutor:
                     else:
                         self.mousecontroller.set_position_pixels(pt.x, pt.y + amount)
                 last += interval
-                if self.input_cfg.debug_inputs:
-                    self.log.info(f"[INC] {out.value} TICK axis={axis} amt={amount} rate={rate:.1f}/s")
             state["last"] = last

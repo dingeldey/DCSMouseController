@@ -96,6 +96,38 @@ class MouseController:
             return monitors[index]
         return None
 
+    def button_down(self, button: str):
+        mapping = {
+            "MB1": 0x0002,  # LEFTDOWN
+            "MB2": 0x0008,  # RIGHTDOWN
+            "MB3": 0x0020,  # MIDDLEDOWN
+            "MB4": 0x0080,  # XDOWN (XBUTTON1)
+            "MB5": 0x0100,  # XDOWN (XBUTTON2)
+        }
+        flag = mapping.get(button)
+        if not flag:
+            return
+        inp = INPUT()
+        inp.type = INPUT_MOUSE
+        inp.mi = MOUSEINPUT(0, 0, 0, flag, 0, None)
+        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
+
+    def button_up(self, button: str):
+        mapping = {
+            "MB1": 0x0004,  # LEFTUP
+            "MB2": 0x0010,  # RIGHTUP
+            "MB3": 0x0040,  # MIDDLEUP
+            "MB4": 0x0100,  # XUP (XBUTTON1)
+            "MB5": 0x0200,  # XUP (XBUTTON2)
+        }
+        flag = mapping.get(button)
+        if not flag:
+            return
+        inp = INPUT()
+        inp.type = INPUT_MOUSE
+        inp.mi = MOUSEINPUT(0, 0, 0, flag, 0, None)
+        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
+
     def set_position_monitor_frac(self, monitor_index: int, fx: float, fy: float):
         """Move mouse to fraction of a specific monitor."""
         hmon = self.get_monitor_handle(monitor_index)
@@ -162,35 +194,47 @@ class MouseController:
             self.log.warning(f"[MOUSE] Unsupported move axis: {axis}")
 
     # --- Click buttons ---
-    def click(self, button: str):
-        mapping = {
-            "MB1": 0x0002,  # MOUSEEVENTF_LEFTDOWN
-            "MB2": 0x0008,  # MOUSEEVENTF_RIGHTDOWN
-            "MB3": 0x0020,  # MOUSEEVENTF_MIDDLEDOWN
-            "MB4": 0x0080,  # MOUSEEVENTF_XDOWN (XBUTTON1)
-            "MB5": 0x0100,  # MOUSEEVENTF_XDOWN (XBUTTON2)
-        }
-        up_mapping = {
-            "MB1": 0x0004,  # LEFTUP
-            "MB2": 0x0010,  # RIGHTUP
-            "MB3": 0x0040,  # MIDDLEUP
-            "MB4": 0x0100,  # XUP (XBUTTON1)
-            "MB5": 0x0200,  # XUP (XBUTTON2)
-        }
+    def click(self, button: str, hold_ms: int = 30):
+        """
+        Simulate a full click (DOWN+UP) for MB1–MB5.
+        MB1 = left, MB2 = right, MB3 = middle, MB4 = X1, MB5 = X2.
+        hold_ms = how long to hold the button down before releasing (default 30 ms).
+        """
+        btn = button.upper()
 
-        down_flag = mapping.get(button)
-        up_flag   = up_mapping.get(button)
-        if not down_flag:
+        if btn == "MB1":
+            down, up, data = MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 0
+        elif btn == "MB2":
+            down, up, data = MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, 0
+        elif btn == "MB3":
+            down, up, data = MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, 0
+        elif btn == "MB4":
+            down, up, data = 0x0800, 0x1000, 0x0001  # XDOWN/XUP + XBUTTON1
+        elif btn == "MB5":
+            down, up, data = 0x0800, 0x1000, 0x0002  # XDOWN/XUP + XBUTTON2
+        else:
+            if self.log:
+                self.log.warning(f"[MOUSE] Unsupported button: {button}")
             return
 
+        # send DOWN
         inp = INPUT()
         inp.type = INPUT_MOUSE
-        inp.mi = MOUSEINPUT(0, 0, 0, down_flag, 0, None)
+        inp.mi = MOUSEINPUT(0, 0, data, down, 0, None)
         user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
 
-        inp.mi = MOUSEINPUT(0, 0, 0, up_flag, 0, None)
+        # keep it pressed for hold_ms
+        import time
+        time.sleep(hold_ms / 1000.0)
+
+        # send UP
+        inp = INPUT()
+        inp.type = INPUT_MOUSE
+        inp.mi = MOUSEINPUT(0, 0, data, up, 0, None)
         user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
 
+        if self.log:
+            self.log.debug(f"[MOUSE] Clicked {btn} (held {hold_ms}ms)")
 
     # --- Wheel scroll ---
     def wheel(self, direction: str):

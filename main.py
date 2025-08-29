@@ -4,6 +4,7 @@ main.py - Entry point for DCS Mouse Controller
 """
 
 import argparse
+import sys
 import time
 import ctypes
 import ctypes.wintypes as wt
@@ -17,6 +18,17 @@ from utils.controller.keymapper import KeyMapper
 from utils.controller.mousecontroller import MouseController
 from utils.logger.logger import setup_logger
 
+def check_single_instance(mutex_name="DCSMouseControllerMutex"):
+    """Ensure only one instance of this program runs."""
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    handle = kernel32.CreateMutexW(None, False, mutex_name)
+
+    # ERROR_ALREADY_EXISTS = 183
+    last_error = kernel32.GetLastError()
+    if last_error == 183:
+        print("Another instance is already running.")
+        sys.exit(1)
 
 # ----------------------------------------------------------------------
 # Window lister helper
@@ -138,6 +150,7 @@ def run_main(log, cfgfile):
 
 
 def main():
+    check_single_instance()
     parser = argparse.ArgumentParser(description="DCS Mouse Controller")
     parser.add_argument(
         "--config",

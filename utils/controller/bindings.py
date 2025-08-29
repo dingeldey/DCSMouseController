@@ -115,7 +115,12 @@ def parse_output(action_str: str) -> OutputAction:
 
     # --- Mouse buttons ---
     if base.startswith("MB"):
-        return OutputAction("mouse_button", base, mode)
+        hold_ms = 30
+        # Optional last numeric → hold_ms
+        if parts and parts[-1].isdigit():
+            hold_ms = int(parts[-1])
+            parts = parts[:-1]
+        return OutputAction("mouse_button", base, mode, extra={"hold_ms": hold_ms})
 
     # --- Mouse wheel ---
     if base.startswith("Wheel"):
@@ -183,6 +188,7 @@ def parse_output(action_str: str) -> OutputAction:
     # --- Default: Key ---
     return OutputAction("key", base, mode)
 
+
 # ---------------------------------------------------------------
 # Config classes
 # ---------------------------------------------------------------
@@ -245,15 +251,21 @@ class KeyMapConfig:
                     inp = parse_input(lhs)
                     out = parse_output(rhs)
 
-                    # merge outputs if same input already exists
                     existing = next((bm for bm in maps if bm.input == inp), None)
                     if existing:
                         existing.outputs.append(out)
                     else:
                         maps.append(BindingMap(inp, [out]))
 
-        if log: log.info(f"[BINDINGS] Loaded {len(maps)} key mappings")
+        if log:
+            log.info(f"[BINDINGS] Loaded {len(maps)} key mappings")
+            for bm in maps:
+                log.info(
+                    f"[BINDING] Input={bm.input} → "
+                    + ", ".join(f"{o.type}:{o.value}:{o.mode}" for o in bm.outputs)
+                )
         return maps
+
 
 class AxisMapConfig:
     @classmethod
@@ -275,5 +287,12 @@ class AxisMapConfig:
                     else:
                         maps.append(BindingMap(inp, [out]))
 
-        if log: log.info(f"[BINDINGS] Loaded {len(maps)} axis mappings")
+        if log:
+            log.info(f"[BINDINGS] Loaded {len(maps)} axis mappings")
+            for bm in maps:
+                log.info(
+                    f"[BINDING] Input={bm.input} → "
+                    + ", ".join(f"{o.type}:{o.value}:{o.mode}" for o in bm.outputs)
+                )
         return maps
+

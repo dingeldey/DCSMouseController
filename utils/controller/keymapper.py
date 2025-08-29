@@ -6,12 +6,14 @@ Supports combos like: "A", "F1", "Ctrl+Shift+F5", "Alt+Tab"
 
 import ctypes
 import ctypes.wintypes as wt
+import time
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 
 # --- constants ---
 INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
+
 # pick correct ULONG_PTR
 if ctypes.sizeof(ctypes.c_void_p) == 8:
     ULONG_PTR = ctypes.c_ulonglong
@@ -57,7 +59,6 @@ class INPUT(ctypes.Structure):
         ("type", wt.DWORD),
         ("u", _INPUTUNION),
     ]
-
 
 
 # --- Helpers for mapping strings to VK codes ---
@@ -113,16 +114,20 @@ def _vk_from_str(key: str) -> int:
     }
     return mapping.get(k, 0)
 
+
 # --- Main class ---
 class KeyMapper:
     def __init__(self, log=None):
         self.log = log
 
-    def send_key(self, combo: str):
-        """
-        Send a key combo like 'A', 'Ctrl+F1', 'Ctrl+Shift+F5'.
-        Presses modifiers first, then main key, then releases modifiers.
-        """
+    def tap(self, combo: str, hold_ms: int = 30):
+        """Press + release a combo with optional hold time (default 30 ms)."""
+        self.key_down(combo)
+        time.sleep(hold_ms / 1000.0)
+        self.key_up(combo)
+
+    def key_down(self, combo: str):
+        """Press a combo and keep it held (until key_up)."""
         parts = [p.strip() for p in combo.split("+") if p.strip()]
         vks = [_vk_from_str(p) for p in parts]
         if not vks or any(vk == 0 for vk in vks):
@@ -130,20 +135,32 @@ class KeyMapper:
                 self.log.warning(f"[KEYMAPPER] Unknown key combo: {combo}")
             return
 
-        # press modifiers (all except last)
-        for vk in vks[:-1]:
+        # press all in order
+        for vk in vks:
             self._send_vk(vk, down=True)
 
-        # press/release main key
-        self._send_vk(vks[-1], down=True)
-        self._send_vk(vks[-1], down=False)
+        if self.log:
+            self.log.debug(f"[KEYMAPPER] DOWN combo: {combo}")
 
-        # release modifiers
-        for vk in reversed(vks[:-1]):
+    def key_up(self, combo: str):
+        """Release a combo that was held with key_down()."""
+        parts = [p.strip() for p in combo.split("+") if p.strip()]
+        vks = [_vk_from_str(p) for p in parts]
+        if not vks or any(vk == 0 for vk in vks):
+            if self.log:
+                self.log.warning(f"[KEYMAPPER] Unknown key combo: {combo}")
+            return
+
+        # release all in reverse order
+        for vk in reversed(vks):
             self._send_vk(vk, down=False)
 
         if self.log:
-            self.log.info(f"[KEYMAPPER] Sent key combo: {combo}")
+            self.log.debug(f"[KEYMAPPER] UP combo: {combo}")
+
+    def send_key(self, combo: str):
+        """Legacy: tap a key combo immediately (for compatibility)."""
+        self.tap(combo, hold_ms=30)
 
     def _send_vk(self, vk: int, down=True):
         flags = 0 if down else KEYEVENTF_KEYUP
@@ -157,5 +174,3 @@ class KeyMapper:
         else:
             if self.log:
                 self.log.debug(f"[KEYMAPPER] {'DOWN' if down else 'UP'} vk=0x{vk:02X}")
-
-
