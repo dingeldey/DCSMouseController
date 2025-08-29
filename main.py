@@ -9,6 +9,7 @@ import time
 import ctypes
 import ctypes.wintypes as wt
 from pathlib import Path
+import msvcrt
 
 from utils.controller.detector import InputDetector
 from utils.controller.executor import InputExecutor
@@ -28,6 +29,10 @@ def check_single_instance(mutex_name="DCSMouseControllerMutex"):
     last_error = kernel32.GetLastError()
     if last_error == 183:
         print("Another instance is already running.")
+
+
+        print("Press any key to exit...")
+        msvcrt.getch()
         sys.exit(1)
 
 # ----------------------------------------------------------------------
