@@ -88,14 +88,14 @@ class InputExecutor:
     # Keys / Buttons
     # ---------------------------------------------------------------
     def _exec_key(self, out):
-        if self.input_cfg.debug_inputs:
-            self.log.info(f"[INPUT] key {out.value}")
+        if self.input_cfg.debug_inputs or self.input_cfg.log_buttons:
+            self.log.info(f"[KEY] {out.value}")
         self.keymapper.send_key(out.value)
 
     def _exec_button(self, out, event):
         if event.pressed:
-            if self.input_cfg.debug_inputs:
-                self.log.info(f"[INPUT] mouse button {out.value}")
+            if self.input_cfg.debug_inputs or self.input_cfg.log_buttons:
+                self.log.info(f"[BUTTON] Mouse {out.value} pressed")
             self.mousecontroller.click(out.value)
 
     # ---------------------------------------------------------------
@@ -193,9 +193,9 @@ class InputExecutor:
                 self._abs_pos[1] = max(y0, min(y0 + h - 1, self._abs_pos[1]))
                 self.mousecontroller.set_position_pixels(self._abs_pos[0], self._abs_pos[1])
 
-        if self.input_cfg.debug_inputs:
+        if self.input_cfg.debug_inputs or self.input_cfg.log_axes:
             self.log.info(
-                f"[INPUT] axis {axis_name.upper()} val={value:.3f} vel={velocity:.1f} step={step}"
+                f"[AXIS] {axis_name.upper()} val={value:.3f} vel={velocity:.1f} step={step}"
             )
 
     # ---------------------------------------------------------------
@@ -203,7 +203,7 @@ class InputExecutor:
     # ---------------------------------------------------------------
     def _exec_center(self, out):
         if self.input_cfg.debug_inputs:
-            self.log.info(f"[CENTER DEBUG] out.extra = {out.extra}")
+            self.log.debug(f"[CENTER DEBUG] out.extra = {out.extra}")
 
         ttype = out.extra.get("target_type", "Virtual")
         tval  = out.extra.get("target_val")

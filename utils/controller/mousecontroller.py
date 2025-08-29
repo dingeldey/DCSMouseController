@@ -150,7 +150,6 @@ class MouseController:
         inp.type = INPUT_MOUSE
         inp.mi = MOUSEINPUT(dx, dy, 0, MOUSEEVENTF_MOVE, 0, None)
         user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
-        self.log.debug(f"[MOUSE] Move relative: dx={dx}, dy={dy}")
 
     # --- New helper: move along one axis ---
     def move_axis(self, axis: str, amount: int = 5):

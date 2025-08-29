@@ -194,18 +194,25 @@ class InputConfig:
         self.axis_speed = 400
         self.axis_mode = "relative"
         self.axis_poll_hz = 250
+        # Debug
         self.debug_inputs = False
+        self.log_buttons = False
+        self.log_axes = False
 
     @classmethod
     def from_ini(cls, cfg):
-        mod = None; tog = None
+        mod = None
+        tog = None
         if cfg.cfg.has_option("input", "modifier"):
             val = cfg.get_str("input", "modifier")
-            if val: mod = parse_input(val)
+            if val:
+                mod = parse_input(val)
         if cfg.cfg.has_option("input", "button_toggle"):
             val = cfg.get_str("input", "button_toggle")
-            if val: tog = parse_input(val)
+            if val:
+                tog = parse_input(val)
         obj = cls(mod, tog)
+
         if cfg.cfg.has_option("input", "axis_deadzone"):
             obj.axis_deadzone = float(cfg.get_str("input", "axis_deadzone"))
         if cfg.cfg.has_option("input", "axis_speed"):
@@ -214,9 +221,15 @@ class InputConfig:
             obj.axis_mode = cfg.get_str("input", "axis_mode")
         if cfg.cfg.has_option("input", "axis_poll_hz"):
             obj.axis_poll_hz = int(cfg.get_str("input", "axis_poll_hz"))
+
         if cfg.cfg.has_option("input", "debug_inputs"):
-            obj.debug_inputs = cfg.cfg.getboolean("input","debug_inputs")
+            obj.debug_inputs = cfg.cfg.getboolean("input", "debug_inputs")
+        if cfg.cfg.has_option("input", "log_buttons"):
+            obj.log_buttons = cfg.cfg.getboolean("input", "log_buttons")
+        if cfg.cfg.has_option("input", "log_axes"):
+            obj.log_axes = cfg.cfg.getboolean("input", "log_axes")
         return obj
+
 
 class KeyMapConfig:
     @classmethod

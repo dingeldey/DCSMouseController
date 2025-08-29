@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+"""
+main.py - Entry point for DCS Mouse Controller
+"""
+
+import argparse
+import time
+import ctypes
+import ctypes.wintypes as wt
+from pathlib import Path
+
 from utils.controller.detector import InputDetector
 from utils.controller.executor import InputExecutor
 from utils.controller.bindings import InputConfig, KeyMapConfig, AxisMapConfig
@@ -5,12 +16,11 @@ from utils.file.inireader import IniReader
 from utils.controller.keymapper import KeyMapper
 from utils.controller.mousecontroller import MouseController
 from utils.logger.logger import setup_logger
-import time
 
 
-import ctypes
-import ctypes.wintypes as wt
-
+# ----------------------------------------------------------------------
+# Window lister helper
+# ----------------------------------------------------------------------
 def list_top_level_windows(log):
     user32 = ctypes.windll.user32
 
@@ -55,41 +65,84 @@ def list_top_level_windows(log):
     EnumWindows(EnumWindowsProc(enum_cb), 0)
     log.info("[WIN] Done listing windows.")
 
-def run_main(log):
-    # Init configs, devices
 
-    cfg = IniReader("default.ini")
+# ----------------------------------------------------------------------
+# Config selector
+# ----------------------------------------------------------------------
+def select_config_file(explicit: str | None, log):
+    if explicit:
+        return explicit
+
+    # Look for *.ini files in current directory
+    ini_files = sorted(Path(".").glob("*.ini"))
+    if not ini_files:
+        log.error("No INI configuration files found in current directory.")
+        raise SystemExit(1)
+
+    if len(ini_files) == 1:
+        log.info(f"Found only one config: {ini_files[0]}")
+        return str(ini_files[0])
+
+    # Multiple INIs → let user choose
+    print("\nAvailable config files:")
+    for idx, f in enumerate(ini_files, start=1):
+        print(f"  {idx}. {f.name}")
+    while True:
+        try:
+            choice = int(input("Select config file [1-{}]: ".format(len(ini_files))))
+            if 1 <= choice <= len(ini_files):
+                return str(ini_files[choice - 1])
+        except Exception:
+            pass
+        print("Invalid choice, try again.")
+
+
+# ----------------------------------------------------------------------
+# Main runner
+# ----------------------------------------------------------------------
+def run_main(log, cfgfile):
+    cfg = IniReader(cfgfile)
     input_cfg = InputConfig.from_ini(cfg)
-    keymaps = KeyMapConfig.from_ini(cfg)
-    axismaps = AxisMapConfig.from_ini(cfg)
+    keymaps = KeyMapConfig.from_ini(cfg, log)
+    axismaps = AxisMapConfig.from_ini(cfg, log)
 
     detector = InputDetector(log, input_cfg, keymaps + axismaps)
-
-    # Now also list windows
-    list_top_level_windows(log)
-
     keymapper = KeyMapper(log)
     mouse = MouseController(log)
     executor = InputExecutor(log, keymapper, mouse, input_cfg)
 
     log.info(f"Loaded {len(keymaps)} key mappings and {len(axismaps)} axis mappings")
+    log.info(f"Using config file: {cfgfile}")
 
-    # Main loop
+    # List windows at startup
+    list_top_level_windows(log)
+
     frame_dt = 1.0 / max(1, input_cfg.axis_poll_hz)
     while True:
         events = detector.poll()
         for ev in events:
             executor.handle_event(ev)
-
-        # IMPORTANT: update once per frame to drive wheel hold-to-scroll
         executor.update()
         time.sleep(frame_dt)
 
+
 def main():
+    parser = argparse.ArgumentParser(description="DCS Mouse Controller")
+    parser.add_argument(
+        "--config",
+        "-c",
+        type=str,
+        default=None,
+        help="INI config file (default: ask user if multiple exist)",
+    )
+    args = parser.parse_args()
+
     log = setup_logger("dcsmouse", logfile="log.log")
     log.info("Starting DCS Mouse Controller")
 
-    run_main(log)
+    cfgfile = select_config_file(args.config, log)
+    run_main(log, cfgfile)
+
 
 if __name__ == "__main__":
     main()
