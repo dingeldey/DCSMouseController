@@ -102,6 +102,10 @@ def select_config_file(explicit: str | None, log):
 # ----------------------------------------------------------------------
 def run_main(log, cfgfile):
     cfg = IniReader(cfgfile)
+
+    # List windows at startup
+    list_top_level_windows(log)
+
     input_cfg = InputConfig.from_ini(cfg)
     keymaps = KeyMapConfig.from_ini(cfg, log)
     axismaps = AxisMapConfig.from_ini(cfg, log)
@@ -111,11 +115,18 @@ def run_main(log, cfgfile):
     mouse = MouseController(log)
     executor = InputExecutor(log, keymapper, mouse, input_cfg)
 
-    log.info(f"Loaded {len(keymaps)} key mappings and {len(axismaps)} axis mappings")
-    log.info(f"Using config file: {cfgfile}")
+    # Count invalid bindings (device not found)
+    invalid = 0
+    for bm in keymaps + axismaps:
+        js = detector._resolve_device(bm.input)
+        if js is None:
+            invalid += 1
 
-    # List windows at startup
-    list_top_level_windows(log)
+    log.info(
+        f"Loaded {len(keymaps)} key mappings and {len(axismaps)} axis mappings "
+        f"({invalid} invalid bindings)"
+    )
+
 
     frame_dt = 1.0 / max(1, input_cfg.axis_poll_hz)
     while True:

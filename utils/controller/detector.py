@@ -17,7 +17,7 @@ class InputDetector:
         self.log = log
         self.input_cfg = input_cfg
         self.bindings = bindings
-        self.state_cache = {}  # (binding, idx) -> state
+        self.state_cache = {}
         pygame.init()
         pygame.joystick.init()
 
@@ -29,12 +29,29 @@ class InputDetector:
             try:
                 guid = js.get_guid()
             except AttributeError:
-                guid = f"index-{i}"   # fallback if GUID not supported
+                guid = f"index-{i}"
             self.devices.append((i, js, guid))
             self.log.info(
                 f"[DEVICE] Joystick {i}: {js.get_name()} "
                 f"(GUID={guid}) Buttons={js.get_numbuttons()} Axes={js.get_numaxes()}"
             )
+
+        # --- NEW: verify bindings ---
+        for bm in self.bindings:
+            ib = bm.input
+            match = False
+            for idx, js, guid in self.devices:
+                if ib.device_guid and ib.device_guid.lower() == guid.lower():
+                    match = True
+                    break
+                if ib.device_index is not None and ib.device_index == idx:
+                    match = True
+                    break
+            if not match:
+                self.log.warning(
+                    f"[BINDINGS] No attached device for binding: "
+                    f"guid={ib.device_guid} index={ib.device_index} ({bm})"
+                )
 
 
     def _resolve_device(self, ib):
