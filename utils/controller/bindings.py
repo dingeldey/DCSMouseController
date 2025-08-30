@@ -210,6 +210,10 @@ class InputConfig:
         self.debug_inputs = False
         self.log_buttons = False
         self.log_axes = False
+        # Wiggle
+        self.wiggle_initially_on = False
+        self.wiggle_px = 5
+        self.wiggle_ms = 1000
 
     @classmethod
     def from_ini(cls, cfg):
@@ -240,7 +244,28 @@ class InputConfig:
             obj.log_buttons = cfg.cfg.getboolean("input", "log_buttons")
         if cfg.cfg.has_option("input", "log_axes"):
             obj.log_axes = cfg.cfg.getboolean("input", "log_axes")
+
+        # --- wiggle_initially_on with params ---
+        if cfg.cfg.has_option("input", "wiggle_initially_on"):
+            raw = cfg.get_str("input", "wiggle_initially_on")
+            tokens = [t.strip() for t in raw.split(":")]
+
+            # first token = boolean
+            if tokens[0].lower() in ("1", "true", "yes", "on"):
+                obj.wiggle_initially_on = True
+            else:
+                obj.wiggle_initially_on = False
+
+            # optional amplitude
+            if len(tokens) > 1 and tokens[1].isdigit():
+                obj.wiggle_px = int(tokens[1])
+
+            # optional period
+            if len(tokens) > 2 and tokens[2].isdigit():
+                obj.wiggle_ms = int(tokens[2])
+
         return obj
+
 
 
 class KeyMapConfig:

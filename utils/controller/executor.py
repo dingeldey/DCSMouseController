@@ -33,10 +33,14 @@ class InputExecutor:
         self.wheel_state = {}
 
         # wiggle state
-        self.wiggle_active = False
+        self.wiggle_active = input_cfg.wiggle_initially_on
         self.last_wiggle = 0
-        self.wiggle_px = 5
-        self.wiggle_ms = 1000
+        self.wiggle_px = input_cfg.wiggle_px
+        self.wiggle_ms = input_cfg.wiggle_ms
+        self.wiggle_mode = "relative"
+        if self.wiggle_active and self.log:
+            self.log.info(f"[WIGGLE] initially ON (px={self.wiggle_px}, ms={self.wiggle_ms})")
+
         self.wiggle_mode = "relative"
 
         # increment state (per-binding)
@@ -338,6 +342,9 @@ class InputExecutor:
             self.wiggle_mode = out.extra.get("wiggle_mode", "relative")
             self.wiggle_px = out.extra.get("wiggle_px", 5)
             self.wiggle_ms = out.extra.get("wiggle_ms", 1000)
+        if self.input_cfg.debug_inputs:
+            self.log.info(f"[WIGGLE] {'ON' if self.wiggle_active else 'OFF'}")
+
 
     def _update_wiggle(self):
         if not self.wiggle_active:
