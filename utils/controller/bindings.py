@@ -139,20 +139,23 @@ def parse_output(action_str: str) -> OutputAction:
         target_type = "Virtual"
         target_val  = None
         pos = None
+        pos_mode = None
 
         for token in parts[1:]:
             if token in ("Virtual","Monitor","WindowClass","WindowName"):
                 target_type = token
+            elif token in ("px","frac"):
+                pos_mode = token
             elif token.startswith("[") and token.endswith("]"):
                 try:
                     x_str, y_str = token[1:-1].split(",")
-                    fx, fy = float(x_str), float(y_str)
-                    if 0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0:
-                        pos = ("frac", (fx, fy))
-                    else:
+                    if pos_mode == "px":
                         pos = ("px", (int(float(x_str)), int(float(y_str))))
+                    else:  # default frac
+                        pos = ("frac", (float(x_str), float(y_str)))
                 except Exception:
                     pos = None
+                pos_mode = None
             else:
                 target_val = token
 
@@ -185,9 +188,12 @@ def parse_output(action_str: str) -> OutputAction:
         extra = {"axis": axis, "amount": amount, "mode": inc_mode}
         return OutputAction("mouse_increment", base, "hold", init, vmax, ramp, extra=extra)
 
-    # --- Default: Key ---
-    return OutputAction("key", base, mode)
-
+    # --- Default: Key (with optional ms) ---
+    hold_ms = 30
+    if parts and parts[-1].isdigit():
+        hold_ms = int(parts[-1])
+        parts = parts[:-1]
+    return OutputAction("key", base, mode, extra={"hold_ms": hold_ms})
 
 # ---------------------------------------------------------------
 # Config classes
@@ -262,7 +268,7 @@ class KeyMapConfig:
             for bm in maps:
                 log.info(
                     f"[BINDING] Input={bm.input} → "
-                    + ", ".join(f"{o.type}:{o.value}:{o.mode}" for o in bm.outputs)
+                    + ", ".join(f"{o.type}:{o.value}:{o.mode}, extra={o.extra}" for o in bm.outputs)
                 )
         return maps
 
@@ -292,7 +298,6 @@ class AxisMapConfig:
             for bm in maps:
                 log.info(
                     f"[BINDING] Input={bm.input} → "
-                    + ", ".join(f"{o.type}:{o.value}:{o.mode}" for o in bm.outputs)
+                    + ", ".join(f"{o.type}:{o.value}:{o.mode}, extra={o.extra}" for o in bm.outputs)
                 )
         return maps
-

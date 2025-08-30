@@ -128,6 +128,17 @@ class MouseController:
         inp.mi = MOUSEINPUT(0, 0, 0, flag, 0, None)
         user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
 
+    def set_position_window_px(self, hwnd=None, title=None, class_name=None, x=0, y=0):
+        """Move mouse to absolute pixel coordinates inside a specific window."""
+        if hwnd is None:
+            hwnd = self.find_window(title=title, class_name=class_name)
+        if not hwnd:
+            return
+        wx, wy, ww, wh = self.get_window_rect(hwnd)
+        abs_x = int(wx + min(max(x, 0), ww - 1))
+        abs_y = int(wy + min(max(y, 0), wh - 1))
+        self.set_position_pixels(abs_x, abs_y)
+
     def set_position_monitor_frac(self, monitor_index: int, fx: float, fy: float):
         """Move mouse to fraction of a specific monitor."""
         hmon = self.get_monitor_handle(monitor_index)
