@@ -3,14 +3,6 @@
 main.py - Entry point for DCS Mouse Controller
 """
 
-import argparse
-import sys
-import time
-import ctypes
-import ctypes.wintypes as wt
-from pathlib import Path
-import msvcrt
-
 from utils.controller.detector import InputDetector
 from utils.controller.executor import InputExecutor
 from utils.controller.bindings import InputConfig, KeyMapConfig, AxisMapConfig
@@ -18,6 +10,16 @@ from utils.file.inireader import IniReader
 from utils.controller.keymapper import KeyMapper
 from utils.controller.mousecontroller import MouseController
 from utils.logger.logger import setup_logger
+
+import sys
+import time
+import ctypes
+import ctypes.wintypes as wt
+from pathlib import Path
+import msvcrt
+import logging
+import argparse
+
 
 def check_single_instance(mutex_name="DCSMouseControllerMutex"):
     """Ensure only one instance of this program runs."""
@@ -154,21 +156,48 @@ def run_main(log, cfgfile):
         time.sleep(frame_dt)
 
 
+
 def main():
-    check_single_instance()
+    # 1) Parse CLI first so `args` exists
     parser = argparse.ArgumentParser(description="DCS Mouse Controller")
-    parser.add_argument(
-        "--config",
-        "-c",
-        type=str,
-        default=None,
-        help="INI config file (default: ask user if multiple exist)",
-    )
+    parser.add_argument("--config", "-c", type=str, default=None,
+                        help="INI config file (default: pick automatically)")
     args = parser.parse_args()
 
-    log = setup_logger("dcsmouse", logfile="log.log")
+    # 2) Logger
+    log = setup_logger(
+        "dcsmouse",
+        logfile="log.log",
+        console=True,
+        console_level=logging.INFO,
+        file_level=logging.DEBUG,
+        color_console=True,
+    )
     log.info("Starting DCS Mouse Controller")
 
+    # 3) Early device dump (before INI selection)
+    try:
+        import pygame
+        pygame.init()
+        pygame.joystick.init()
+        count = pygame.joystick.get_count()
+        if count == 0:
+            log.info("[DEVICE] No controllers detected")
+        else:
+            for i in range(count):
+                js = pygame.joystick.Joystick(i); js.init()
+                try:
+                    guid = js.get_guid()
+                except AttributeError:
+                    guid = f"index-{i}"
+                log.info(
+                    f"[DEVICE] Joystick {i}: {js.get_name()} "
+                    f"(GUID={guid}) Buttons={js.get_numbuttons()} Axes={js.get_numaxes()}"
+                )
+    except Exception as e:
+        log.warning(f"[DEVICE] Enumeration failed: {e}")
+
+    # 4) Now select INI and run
     cfgfile = select_config_file(args.config, log)
     run_main(log, cfgfile)
 
