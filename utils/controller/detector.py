@@ -46,10 +46,6 @@ class InputDetector:
             except AttributeError:
                 guid = f"index-{i}"
             self.devices.append((i, js, guid))
-            self.log.info(
-                f"[DEVICE] Joystick {i}: {js.get_name()} "
-                f"(GUID={guid}) Buttons={js.get_numbuttons()} Axes={js.get_numaxes()}"
-            )
 
         # Verify bindings point at something we actually have (best-effort)
         for bm in self.bindings:
