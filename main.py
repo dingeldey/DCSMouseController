@@ -158,6 +158,8 @@ def run_main(log, cfgfile):
 
 
 def main():
+    check_single_instance()
+
     # 1) Parse CLI first so `args` exists
     parser = argparse.ArgumentParser(description="DCS Mouse Controller")
     parser.add_argument("--config", "-c", type=str, default=None,
