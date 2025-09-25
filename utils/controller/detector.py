@@ -12,6 +12,7 @@ Adds proper modifier-layer routing AND a global inhibit for base buttons:
 
 Axis mappings are unchanged (only base **buttons** are inhibited).
 """
+import logging
 
 import pygame
 from dataclasses import dataclass
@@ -149,8 +150,13 @@ class InputDetector:
         # Check modifier once per poll
         mod_on = self._modifier_active()
         if mod_on != self._last_mod_on:
-            self.log.info("[MOD] M -> %s", "ON" if mod_on else "OFF")
             self._last_mod_on = mod_on
+
+            # Show on console only when verbose:
+            # - if debug_inputs = true  → log at INFO (global debug override)
+            # - else                    → log at DEBUG (visible only in verbose logging)
+            level = logging.INFO if self.input_cfg.debug_inputs else logging.DEBUG
+            self.log.log(level, "[MOD] M -> %s", "ON" if mod_on else "OFF")
 
         for bm in self.bindings:
             ib = bm.input
