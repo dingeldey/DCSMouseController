@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Optional, Literal
+import re
 
 # ---------------------------------------------------------------
 # Helper: split binding string but keep [x,y] coordinates together
@@ -88,16 +89,64 @@ def parse_input(binding_str: str) -> InputBinding:
                             btn_number - 1,
                             modifier_layer=modifier_layer)
     elif parts[offset] == "axis":
-        axis_id = int(parts[offset + 1])
+        # Allow three forms:
+        #   A) legacy:  dev:...:axis:<id>:pos|neg|abs:<thr>
+        #   B) inline:  dev:...:axis:<id><op><value>        (e.g. axis:1>0.6, axis:1<-0.6)
+        #   C) tokens:  dev:...:axis:<id>:<op>:<value>      (e.g. axis:1:>:0.6, axis:1:<:-0.6)
+        axis_tok = parts[offset + 1]
+
+        # --- Form B: inline comparator in the axis token (e.g. "1>0.6" or "1 < -0.6")
+        m = re.match(r"^\s*(\d+)\s*(>=|<=|>|<)\s*(-?\d+(?:\.\d+)?)\s*$", axis_tok)
+        if m:
+            axis_id = int(m.group(1))
+            op = m.group(2)
+            val = float(m.group(3))
+            if op in (">", ">="):
+                return InputBinding(guid, device_index, "axis", axis_id,
+                                    axis_mode="pos", threshold=val,
+                                    modifier_layer=modifier_layer)
+            elif op in ("<", "<="):
+                if val >= 0:
+                    raise ValueError(
+                        f"Use a negative value for '<' comparator (e.g. axis:{axis_id} < -0.6); got {val}"
+                    )
+                return InputBinding(guid, device_index, "axis", axis_id,
+                                    axis_mode="neg", threshold=abs(val),
+                                    modifier_layer=modifier_layer)
+
+        # parse plain axis id
+        axis_id = int(axis_tok)
+
         mode = None
         thr = None
-        if len(parts) > offset+2:
-            mode = parts[offset+2]
-            if mode in ("pos","neg","abs"):
-                thr = float(parts[offset+3])
+
+        # --- Form C: colon-separated comparator tokens (e.g. ":>:0.6" or ":<:-0.6")
+        if len(parts) > offset + 2 and parts[offset + 2] in (">", ">=", "<", "<="):
+            op = parts[offset + 2]
+            val = float(parts[offset + 3])
+            if op in (">", ">="):
+                return InputBinding(guid, device_index, "axis", axis_id,
+                                    axis_mode="pos", threshold=val,
+                                    modifier_layer=modifier_layer)
+            else:  # < or <=
+                if val >= 0:
+                    raise ValueError(
+                        f"Use a negative value for '<' comparator (e.g. axis:{axis_id}:<:-0.6); got {val}"
+                    )
+                return InputBinding(guid, device_index, "axis", axis_id,
+                                    axis_mode="neg", threshold=abs(val),
+                                    modifier_layer=modifier_layer)
+
+        # --- Form A: legacy pos/neg/abs remains supported
+        if len(parts) > offset + 2:
+            mode = parts[offset + 2]
+            if mode in ("pos", "neg", "abs"):
+                thr = float(parts[offset + 3])
+
         return InputBinding(guid, device_index, "axis", axis_id,
                             axis_mode=mode, threshold=thr,
                             modifier_layer=modifier_layer)
+
     raise ValueError(f"Unsupported input type in {binding_str}")
 
 # ---------------------------------------------------------------
