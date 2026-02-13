@@ -28,15 +28,23 @@ def split_binding_string(s: str) -> list[str]:
 # ---------------------------------------------------------------
 # Dataclasses
 # ---------------------------------------------------------------
+
 @dataclass
 class InputBinding:
-    device_guid: Optional[str]
+    device_guid: Optional[str] = None
     device_index: Optional[int] = None
-    input_type: Literal["button","axis"] = "button"
+    device_name: Optional[str] = None  # ✅ new
+
+    input_type: Literal["button", "axis"] = "button"
     input_id: int = 0
-    axis_mode: Optional[Literal["pos","neg","abs"]] = None
-    threshold: Optional[float] = None
-    modifier_layer: bool = False
+
+    # ✅ these MUST exist because parse_input() passes them
+    axis_mode: Optional[str] = None     # e.g. "abs", "rel", "gt", "lt" — whatever your code expects
+    threshold: Optional[float] = None   # used for axis threshold bindings
+
+    # keep your existing type here — your logs show modifier_layer=False (bool)
+    modifier_layer: object = False      # (or bool/Optional[str], match your project’s intent)
+
 
 @dataclass
 class OutputAction:
@@ -62,92 +70,150 @@ class BindingMap:
 def parse_input(binding_str: str) -> InputBinding:
     parts = binding_str.split(":")
     modifier_layer = False
-    if parts[-1] in ("M", ":M"):
+
+    # Modifier suffix: ...:M
+    if parts and parts[-1] == "M":
         modifier_layer = True
         parts = parts[:-1]
 
-    if parts[0] != "dev":
+    if not parts or parts[0] != "dev":
         raise ValueError(f"Binding must start with 'dev:' ({binding_str})")
 
+    if len(parts) < 4:
+        raise ValueError(f"Incomplete binding '{binding_str}' (expected dev:<id>:button|axis:<n>...)")
+
     dev_id = parts[1]
+
     guid = None
     device_index = None
+    device_name = None
+
+    # device selector: index OR GUID OR name
     if dev_id.isdigit():
         device_index = int(dev_id)
-    else:
+    elif len(dev_id) > 16 and all(c in "0123456789abcdef" for c in dev_id.lower()):
         guid = dev_id
+    else:
+        device_name = dev_id  # exact name match
 
     offset = 2
-    if parts[offset] == "button":
+    kind = parts[offset]
+
+    # -----------------
+    # BUTTON BINDINGS
+    # -----------------
+    if kind == "button":
         btn_number = int(parts[offset + 1])
         if btn_number <= 0:
             raise ValueError(
                 f"Invalid button binding '{binding_str}': "
                 f"button numbers in INI are 1-based (got {btn_number})."
             )
-        return InputBinding(guid, device_index, "button",
-                            btn_number - 1,
-                            modifier_layer=modifier_layer)
-    elif parts[offset] == "axis":
-        # Allow three forms:
-        #   A) legacy:  dev:...:axis:<id>:pos|neg|abs:<thr>
-        #   B) inline:  dev:...:axis:<id><op><value>        (e.g. axis:1>0.6, axis:1<-0.6)
-        #   C) tokens:  dev:...:axis:<id>:<op>:<value>      (e.g. axis:1:>:0.6, axis:1:<:-0.6)
+        return InputBinding(
+            device_guid=guid,
+            device_index=device_index,
+            device_name=device_name,
+            input_type="button",
+            input_id=btn_number - 1,
+            axis_mode=None,
+            threshold=None,
+            modifier_layer=modifier_layer,
+        )
+
+    # ---------------
+    # AXIS BINDINGS
+    # ---------------
+    if kind == "axis":
         axis_tok = parts[offset + 1]
 
-        # --- Form B: inline comparator in the axis token (e.g. "1>0.6" or "1 < -0.6")
+        # Form B: inline comparator e.g. "1>0.6" or "1<-0.6"
         m = re.match(r"^\s*(\d+)\s*(>=|<=|>|<)\s*(-?\d+(?:\.\d+)?)\s*$", axis_tok)
         if m:
             axis_id = int(m.group(1))
             op = m.group(2)
             val = float(m.group(3))
             if op in (">", ">="):
-                return InputBinding(guid, device_index, "axis", axis_id,
-                                    axis_mode="pos", threshold=val,
-                                    modifier_layer=modifier_layer)
-            elif op in ("<", "<="):
+                return InputBinding(
+                    device_guid=guid,
+                    device_index=device_index,
+                    device_name=device_name,
+                    input_type="axis",
+                    input_id=axis_id,
+                    axis_mode="pos",
+                    threshold=val,
+                    modifier_layer=modifier_layer,
+                )
+            else:  # < or <=
                 if val >= 0:
                     raise ValueError(
                         f"Use a negative value for '<' comparator (e.g. axis:{axis_id} < -0.6); got {val}"
                     )
-                return InputBinding(guid, device_index, "axis", axis_id,
-                                    axis_mode="neg", threshold=abs(val),
-                                    modifier_layer=modifier_layer)
+                return InputBinding(
+                    device_guid=guid,
+                    device_index=device_index,
+                    device_name=device_name,
+                    input_type="axis",
+                    input_id=axis_id,
+                    axis_mode="neg",
+                    threshold=abs(val),
+                    modifier_layer=modifier_layer,
+                )
 
-        # parse plain axis id
+        # Plain axis id
         axis_id = int(axis_tok)
 
-        mode = None
-        thr = None
-
-        # --- Form C: colon-separated comparator tokens (e.g. ":>:0.6" or ":<:-0.6")
-        if len(parts) > offset + 2 and parts[offset + 2] in (">", ">=", "<", "<="):
+        # Form C: token comparator e.g. ":>:0.6" or ":<:-0.6"
+        if len(parts) > offset + 3 and parts[offset + 2] in (">", ">=", "<", "<="):
             op = parts[offset + 2]
             val = float(parts[offset + 3])
             if op in (">", ">="):
-                return InputBinding(guid, device_index, "axis", axis_id,
-                                    axis_mode="pos", threshold=val,
-                                    modifier_layer=modifier_layer)
-            else:  # < or <=
+                return InputBinding(
+                    device_guid=guid,
+                    device_index=device_index,
+                    device_name=device_name,
+                    input_type="axis",
+                    input_id=axis_id,
+                    axis_mode="pos",
+                    threshold=val,
+                    modifier_layer=modifier_layer,
+                )
+            else:
                 if val >= 0:
                     raise ValueError(
                         f"Use a negative value for '<' comparator (e.g. axis:{axis_id}:<:-0.6); got {val}"
                     )
-                return InputBinding(guid, device_index, "axis", axis_id,
-                                    axis_mode="neg", threshold=abs(val),
-                                    modifier_layer=modifier_layer)
+                return InputBinding(
+                    device_guid=guid,
+                    device_index=device_index,
+                    device_name=device_name,
+                    input_type="axis",
+                    input_id=axis_id,
+                    axis_mode="neg",
+                    threshold=abs(val),
+                    modifier_layer=modifier_layer,
+                )
 
-        # --- Form A: legacy pos/neg/abs remains supported
-        if len(parts) > offset + 2:
+        # Form A: legacy pos/neg/abs + threshold (optional)
+        mode = None
+        thr = None
+        if len(parts) > offset + 3:
             mode = parts[offset + 2]
             if mode in ("pos", "neg", "abs"):
                 thr = float(parts[offset + 3])
 
-        return InputBinding(guid, device_index, "axis", axis_id,
-                            axis_mode=mode, threshold=thr,
-                            modifier_layer=modifier_layer)
+        return InputBinding(
+            device_guid=guid,
+            device_index=device_index,
+            device_name=device_name,
+            input_type="axis",
+            input_id=axis_id,
+            axis_mode=mode,
+            threshold=thr,
+            modifier_layer=modifier_layer,
+        )
 
     raise ValueError(f"Unsupported input type in {binding_str}")
+
 
 # ---------------------------------------------------------------
 # Output parsing

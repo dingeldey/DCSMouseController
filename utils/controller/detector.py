@@ -53,16 +53,27 @@ class InputDetector:
             ib = bm.input
             match = False
             for idx, js, guid in self.devices:
+                # GUID match (case-insensitive)
                 if ib.device_guid and str(ib.device_guid).lower() == str(guid).lower():
                     match = True
                     break
+
+                # Name match (case-insensitive, trimmed)
+                if ib.device_name:
+                    want = str(ib.device_name).strip().casefold()
+                    have = str(js.get_name()).strip().casefold()
+                    if want == have:
+                        match = True
+                        break
+
+                # Index match
                 if ib.device_index is not None and ib.device_index == idx:
                     match = True
                     break
             if not match:
                 self.log.warning(
                     f"[BINDINGS] No attached device for binding: "
-                    f"guid={ib.device_guid} index={ib.device_index} ({bm})"
+                    f"guid={ib.device_guid} name={ib.device_name} index={ib.device_index} ({bm})"
                 )
 
         # Build quick index so we can prefer MOD vs BASE for the same physical input
@@ -72,8 +83,9 @@ class InputDetector:
     # Index: for each physical input key → {'base': bm|None, 'mod': bm|None}
     # ------------------------------------------------------------------
     @staticmethod
-    def _key_for_binding(ib) -> Tuple[Optional[str], Optional[int], str, int]:
-        return (ib.device_guid, ib.device_index, ib.input_type, ib.input_id)
+    def _key_for_binding(ib) -> Tuple[Optional[str], Optional[int], Optional[str], str, int]:
+        return (ib.device_guid, ib.device_index, ib.device_name, ib.input_type, ib.input_id)
+
 
     def _build_index(self, maps):
         idx: Dict[Tuple, Dict[str, object]] = {}
@@ -95,12 +107,26 @@ class InputDetector:
     # ------------------------------------------------------------------
     def _resolve_device(self, ib):
         """Return pygame joystick for given binding input."""
+        want_name = (str(ib.device_name).strip().casefold() if ib.device_name else None)
+        want_guid = (str(ib.device_guid).lower() if ib.device_guid else None)
+
         for idx, js, guid in self.devices:
+            # Prefer explicit index if provided
             if ib.device_index is not None and ib.device_index == idx:
                 return js
-            if ib.device_guid and ib.device_guid == guid:
+
+            # GUID match (case-insensitive)
+            if want_guid and str(guid).lower() == want_guid:
                 return js
+
+            # Name match (case-insensitive, trimmed)
+            if want_name:
+                have_name = str(js.get_name()).strip().casefold()
+                if have_name == want_name:
+                    return js
+
         return None
+
 
     # ------------------------------------------------------------------
     # Global modifier state

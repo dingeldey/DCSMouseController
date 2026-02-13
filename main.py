@@ -182,19 +182,35 @@ def main():
         import pygame
         pygame.init()
         pygame.joystick.init()
+
         count = pygame.joystick.get_count()
         if count == 0:
             log.info("[DEVICE] No controllers detected")
         else:
             for i in range(count):
-                js = pygame.joystick.Joystick(i); js.init()
+                js = pygame.joystick.Joystick(i)
+                js.init()
+
                 try:
                     guid = js.get_guid()
                 except AttributeError:
                     guid = f"index-{i}"
+
+                name = js.get_name()
                 log.info(
-                    f"[DEVICE] Joystick {i}: {js.get_name()} "
-                    f"(GUID={guid}) Buttons={js.get_numbuttons()} Axes={js.get_numaxes()}"
+                    f"[DEVICE] Joystick {i}: name={name!r} GUID={guid} Buttons={js.get_numbuttons()} Axes={js.get_numaxes()}"
+                )
+
+                log.info(
+                    "[DEVICE] Joystick %d\n"
+                    "         Name : %r\n"
+                    "         GUID : %s\n"
+                    "         Btns : %d  Axes : %d",
+                    i,
+                    name,
+                    guid,
+                    js.get_numbuttons(),
+                    js.get_numaxes(),
                 )
     except Exception as e:
         log.warning(f"[DEVICE] Enumeration failed: {e}")
