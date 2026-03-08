@@ -46,46 +46,51 @@ class InputDetector:
                 guid = js.get_guid()
             except AttributeError:
                 guid = f"index-{i}"
-            self.devices.append((i, js, guid))
+
+            try:
+                name = js.get_name()
+            except Exception:
+                name = f"Joystick {i}"
+
+            self.devices.append((i, js, guid, name))
 
         # Verify bindings point at something we actually have (best-effort)
         for bm in self.bindings:
             ib = bm.input
             match = False
-            for idx, js, guid in self.devices:
-                # GUID match (case-insensitive)
-                if ib.device_guid and str(ib.device_guid).lower() == str(guid).lower():
+            for idx, js, guid, name in self.devices:
+                if ib.device_index is not None and ib.device_index == idx:
                     match = True
                     break
-
-                # Name match (case-insensitive, trimmed)
-                if ib.device_name:
-                    want = str(ib.device_name).strip().casefold()
-                    have = str(js.get_name()).strip().casefold()
-                    if want == have:
-                        match = True
-                        break
-
-                # Index match
-                if ib.device_index is not None and ib.device_index == idx:
+                if ib.device_guid and self._string_matches_device(ib.device_guid, guid, name):
                     match = True
                     break
             if not match:
                 self.log.warning(
                     f"[BINDINGS] No attached device for binding: "
-                    f"guid={ib.device_guid} name={ib.device_name} index={ib.device_index} ({bm})"
+                    f"dev={ib.device_guid} index={ib.device_index} ({bm})"
                 )
 
         # Build quick index so we can prefer MOD vs BASE for the same physical input
         self._index = self._build_index(self.bindings)
 
+    @staticmethod
+    def _string_matches_device(dev_token: str, guid: str, name: str) -> bool:
+        if not dev_token:
+            return False
+
+        token = str(dev_token).strip().lower()
+        guid_s = str(guid).strip().lower()
+        name_s = str(name).strip().lower()
+
+        return token == guid_s or token == name_s
+
     # ------------------------------------------------------------------
     # Index: for each physical input key → {'base': bm|None, 'mod': bm|None}
     # ------------------------------------------------------------------
     @staticmethod
-    def _key_for_binding(ib) -> Tuple[Optional[str], Optional[int], Optional[str], str, int]:
-        return (ib.device_guid, ib.device_index, ib.device_name, ib.input_type, ib.input_id)
-
+    def _key_for_binding(ib) -> Tuple[Optional[str], Optional[int], str, int]:
+        return (ib.device_guid, ib.device_index, ib.input_type, ib.input_id)
 
     def _build_index(self, maps):
         idx: Dict[Tuple, Dict[str, object]] = {}
@@ -107,26 +112,12 @@ class InputDetector:
     # ------------------------------------------------------------------
     def _resolve_device(self, ib):
         """Return pygame joystick for given binding input."""
-        want_name = (str(ib.device_name).strip().casefold() if ib.device_name else None)
-        want_guid = (str(ib.device_guid).lower() if ib.device_guid else None)
-
-        for idx, js, guid in self.devices:
-            # Prefer explicit index if provided
+        for idx, js, guid, name in self.devices:
             if ib.device_index is not None and ib.device_index == idx:
                 return js
-
-            # GUID match (case-insensitive)
-            if want_guid and str(guid).lower() == want_guid:
+            if ib.device_guid and self._string_matches_device(ib.device_guid, guid, name):
                 return js
-
-            # Name match (case-insensitive, trimmed)
-            if want_name:
-                have_name = str(js.get_name()).strip().casefold()
-                if have_name == want_name:
-                    return js
-
         return None
-
 
     # ------------------------------------------------------------------
     # Global modifier state
