@@ -47,6 +47,7 @@ class InputExecutor:
         self.increment_state = {}
         self.key_toggle_state = {}
         self.key_toggle_repeat = {}   # tracks repeat timing for toggled keys
+        self.mouse_button_toggle_state = {}
     # ---------------------------------------------------------------
     # Event handling
     # ---------------------------------------------------------------
@@ -60,7 +61,10 @@ class InputExecutor:
                 self._exec_button(out, event)
 
             elif out.type == "mouse_wheel":
-                if event.pressed:
+                if out.mode == "single":
+                    if event.pressed:
+                        self.mousecontroller.wheel(out.value)
+                elif event.pressed:
                     self._start_wheel_hold(ib, out)
                 else:
                     self._stop_wheel_hold(ib, out)
@@ -98,7 +102,8 @@ class InputExecutor:
             if event.pressed:
                 if self.input_cfg.debug_inputs or self.input_cfg.log_buttons:
                     self.log.info(f"[KEY] {out.value} TAP")
-                self.keymapper.tap(out.value)
+                hold_ms = out.extra.get("hold_ms", 30) if out.extra else 30
+                self.keymapper.tap(out.value, hold_ms=hold_ms)
 
         elif out.mode == "hold":
             if event.pressed:
@@ -154,6 +159,18 @@ class InputExecutor:
                 if self.input_cfg.debug_inputs or self.input_cfg.log_buttons:
                     self.log.info(f"[BUTTON] Mouse {out.value} UP")
                 self.mousecontroller.button_up(out.value)
+
+        elif out.mode == "toggle" and event.pressed:
+            key = (out.value, event.binding.input.device_guid, event.binding.input.device_index,
+                   event.binding.input.input_id)
+            active = self.mouse_button_toggle_state.get(key, False)
+            if active:
+                self.mousecontroller.button_up(out.value)
+            else:
+                self.mousecontroller.button_down(out.value)
+            self.mouse_button_toggle_state[key] = not active
+            if self.input_cfg.debug_inputs or self.input_cfg.log_buttons:
+                self.log.info(f"[BUTTON] Mouse {out.value} TOGGLE {'OFF' if active else 'ON'}")
 
     # ---------------------------------------------------------------
     # Wheel hold-to-scroll

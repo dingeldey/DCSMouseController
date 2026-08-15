@@ -162,96 +162,49 @@ def parse_input(binding_str: str) -> InputBinding:
 # Output parsing
 # ---------------------------------------------------------------
 def parse_output(action_str: str) -> OutputAction:
-    parts = split_binding_string(action_str)
-    base = parts[0]
+    # The GUI and runtime intentionally share one parser so the labeled fields
+    # always serialize to exactly what execution expects.
+    from utils.output_actions import parse_action
 
-    # detect :single / :hold / :toggle at the end
-    mode = "single"
-    if parts[-1] in ("single","hold","toggle"):
-        mode = parts[-1]
-        parts = parts[:-1]
+    spec = parse_action(action_str)
+    values = spec.values
+    if spec.kind == "Keyboard key":
+        return OutputAction("key", values["shortcut"], values.get("mode", "single"),
+                            extra={"hold_ms": int(values.get("duration", 30))})
+    if spec.kind == "Mouse button":
+        return OutputAction("mouse_button", values["button"], values.get("mode", "single"),
+                            extra={"hold_ms": int(values.get("duration", 30))})
+    if spec.kind == "Mouse wheel":
+        return OutputAction("mouse_wheel", values["direction"], values.get("mode", "single"),
+                            int(values.get("initial", 5)), int(values.get("maximum", 30)),
+                            int(values.get("ramp", 1000)))
+    if spec.kind == "Mouse movement axis":
+        return OutputAction("mouse_axis", values["axis"], "single")
+    if spec.kind == "Center mouse":
+        coordinate_mode = values.get("coordinate_mode", "frac")
+        caster = int if coordinate_mode == "px" else float
+        position = (coordinate_mode, (caster(float(values.get("x", 0.5))), caster(float(values.get("y", 0.5)))))
+        extra = {"target_type": values.get("target_type", "Virtual"),
+                 "target_val": values.get("target") or None, "position": position}
+        return OutputAction("mouse_center", "CenterMouse", "single", extra=extra)
+    if spec.kind == "Focus window":
+        extra = {"target_type": values.get("target_type", "WindowName"),
+                 "target_val": values.get("target") or None}
+        return OutputAction("focus_window", "FocusWindow", "single", extra=extra)
+    if spec.kind == "Wiggle mouse":
+        extra = {"wiggle_mode": values.get("mode", "relative"),
+                 "wiggle_px": int(values.get("pixels", 5)), "wiggle_ms": int(values.get("period", 1000))}
+        return OutputAction("mouse_wiggle", "WiggleMouse", "toggle", extra=extra)
+    if spec.kind == "Mouse increment":
+        amount = 1 if values.get("direction", "Increase") == "Increase" else -1
+        extra = {"axis": values.get("axis", "x"), "amount": amount,
+                 "mode": values.get("mode", "relative")}
+        name = "MouseInc" if amount > 0 else "MouseDec"
+        return OutputAction("mouse_increment", name, "hold", int(values.get("initial", 5)),
+                            int(values.get("maximum", 30)), int(values.get("ramp", 1000)), extra=extra)
 
-    # --- Mouse buttons ---
-    if base.startswith("MB"):
-        hold_ms = 30
-        # Optional last numeric → hold_ms
-        if parts and parts[-1].isdigit():
-            hold_ms = int(parts[-1])
-            parts = parts[:-1]
-        return OutputAction("mouse_button", base, mode, extra={"hold_ms": hold_ms})
-
-    # --- Mouse wheel ---
-    if base.startswith("Wheel"):
-        wheel_init = wheel_max = wheel_accel = 0
-        if mode == "hold" and len(parts) >= 4:
-            wheel_init = int(parts[1]); wheel_max = int(parts[2]); wheel_accel = int(parts[3])
-        return OutputAction("mouse_wheel", base, mode,
-                            wheel_init, wheel_max, wheel_accel)
-
-    # --- Mouse axes ---
-    if base.lower().startswith("mouse_"):
-        return OutputAction("mouse_axis", base.split("_")[1].lower(), mode)
-
-    # --- CenterMouse ---
-    if base == "CenterMouse":
-        target_type = "Virtual"
-        target_val  = None
-        pos = None
-        pos_mode = None
-
-        for token in parts[1:]:
-            if token in ("Virtual","Monitor","WindowClass","WindowName"):
-                target_type = token
-            elif token in ("px","frac"):
-                pos_mode = token
-            elif token.startswith("[") and token.endswith("]"):
-                try:
-                    x_str, y_str = token[1:-1].split(",")
-                    if pos_mode == "px":
-                        pos = ("px", (int(float(x_str)), int(float(y_str))))
-                    else:  # default frac
-                        pos = ("frac", (float(x_str), float(y_str)))
-                except Exception:
-                    pos = None
-                pos_mode = None
-            else:
-                target_val = token
-
-        extra = {"target_type": target_type, "target_val": target_val, "position": pos}
-        return OutputAction("mouse_center", base, "single", extra=extra)
-
-    # --- WiggleMouse ---
-    if base == "WiggleMouse":
-        wiggle_mode = parts[1] if len(parts) > 1 else "relative"
-        wiggle_px   = int(parts[2]) if len(parts) > 2 else 5
-        wiggle_ms   = int(parts[3]) if len(parts) > 3 else 1000
-        extra = {"wiggle_mode": wiggle_mode, "wiggle_px": wiggle_px, "wiggle_ms": wiggle_ms}
-        return OutputAction("mouse_wiggle", base, "toggle", extra=extra)
-
-    # --- FocusWindow ---
-    if base == "FocusWindow":
-        target_type = parts[1] if len(parts) > 1 else "WindowName"
-        target_val  = parts[2] if len(parts) > 2 else None
-        extra = {"target_type": target_type, "target_val": target_val}
-        return OutputAction("focus_window", base, "single", extra=extra)
-
-    # --- MouseInc / MouseDec ---
-    if base in ("MouseInc","MouseDec"):
-        axis = parts[1] if len(parts) > 1 else "x"
-        inc_mode = parts[2] if len(parts) > 2 else "relative"
-        if len(parts) < 7 or parts[3] != "hold":
-            raise ValueError(f"MouseInc/Dec requires syntax MouseInc:x:relative:hold:init:max:ms (got {action_str})")
-        init = int(parts[4]); vmax = int(parts[5]); ramp = int(parts[6])
-        amount = 1 if base == "MouseInc" else -1
-        extra = {"axis": axis, "amount": amount, "mode": inc_mode}
-        return OutputAction("mouse_increment", base, "hold", init, vmax, ramp, extra=extra)
-
-    # --- Default: Key (with optional ms) ---
-    hold_ms = 30
-    if parts and parts[-1].isdigit():
-        hold_ms = int(parts[-1])
-        parts = parts[:-1]
-    return OutputAction("key", base, mode, extra={"hold_ms": hold_ms})
+    # Preserve the old fallback: an unrecognized raw token is attempted as a key.
+    return OutputAction("key", action_str.split(":", 1)[0], "single", extra={"hold_ms": 30})
 
 # ---------------------------------------------------------------
 # Config classes

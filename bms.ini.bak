@@ -197,26 +197,25 @@
 
 
 [input]
-wiggle_initially_on = false:10:500
+wiggle_initially_on  = false:10:500
 modifier = dev:WINCTRL Orion Joystick Base Metal 2 + JGRIP-F16 + MFSSB:button:8
 
 ; Key bindings (list form)
 ; key maps with per-binding modes
 
 ; Keys are applied from bottom to top
-key_mappings = dev:WINCTRL Orion Joystick Base Metal 2 + JGRIP-F16 + MFSSB:button:26 => WiggleMouse:relative:1:750, \
+key_mappings =  dev:WINCTRL Orion Joystick Base Metal 2 + JGRIP-F16 + MFSSB:button:26 => WiggleMouse:relative:1:750, \
                 dev:WINCTRL Orion Joystick Base Metal 2 + JGRIP-F16 + MFSSB:button:26 => FocusWindow:WindowClass:FalconDisplay, \
                 dev:WINCTRL Orion Joystick Base Metal 2 + JGRIP-F16 + MFSSB:button:26 => CenterMouse:WindowClass:0:frac:[0.5,0.53], \
-                dev:WINCTRL Orion Joystick Base Metal 2 + JGRIP-F16 + MFSSB:button:26 => CenterMouse:WindowClass:0:frac:[0.5,0.53], \
                 dev:WINCTRL Orion Throttle Base II + TGRIP-F16:button:22 => WheelDown:hold:1:50:350, \
-                dev:WINCTRL Orion Throttle Base II + TGRIP-F16:button:20 => WheelUp:hold:1:50:350
+                dev:WINCTRL Orion Throttle Base II + TGRIP-F16:button:20 => WheelUp:hold:1:50:350, \
 
 ; Axis bindings (list form);
 ; Axis steering mode: "relative" (default) or "absolute"
 axis_mode = relative
 ; --- Axis movement acceleration ---; Axis deadzone
 axis_deadzone = 0.025
-axis_speed = 1000
+axis_speed      = 1000
 
 axis_mappings = dev:WINCTRL Orion Joystick Base Metal 2 + JGRIP-F16 + MFSSB:axis:2 => mouse_x, \
                 dev:WINCTRL Orion Joystick Base Metal 2 + JGRIP-F16 + MFSSB:axis:3 => mouse_y
@@ -227,4 +226,3 @@ debug_inputs = false   ; global debug (overrides others if true)
 log_buttons  = false   ; log button press/release
 log_axes     = false   ; log axis values when applied (not every poll)
 
-axis_poll_hz = 250
