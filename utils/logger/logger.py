@@ -21,12 +21,17 @@ def setup_logger(
 ) -> logging.Logger:
 
     logger = logging.getLogger(name)
-    # Set logger level to the lower of the two so nothing gets filtered too early
-    logger.setLevel(min(console_level, file_level))
 
     # Avoid duplicate handlers if called twice
     if logger.handlers:
+        logger.warning(
+            f"[LOGGER] setup_logger('{name}') called again; keeping the existing "
+            f"handlers/levels from the first call instead of applying these new settings"
+        )
         return logger
+
+    # Set logger level to the lower of the two so nothing gets filtered too early
+    logger.setLevel(min(console_level, file_level))
 
     # --- Formatters ---
     file_formatter = logging.Formatter(

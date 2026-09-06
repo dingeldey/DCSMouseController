@@ -42,6 +42,26 @@ class OutputActionTests(unittest.TestCase):
     def test_summary_explains_raw_syntax(self):
         self.assertEqual("Wheel · up · hold 5→30 ticks/s", describe_action("WheelUp:hold:5:30:1000"))
 
+    def test_focus_window_target_with_colon_round_trips(self):
+        spec = ActionSpec("Focus window", {"target_type": "WindowName", "target": "DCS: World"})
+        rendered = render_action(spec)
+        self.assertEqual("FocusWindow:WindowName:[DCS: World]", rendered)
+        self.assertEqual("DCS: World", parse_action(rendered).values["target"])
+
+    def test_center_mouse_target_with_colon_round_trips(self):
+        spec = ActionSpec("Center mouse", {
+            "target_type": "WindowName", "target": "DCS: World",
+            "coordinate_mode": "frac", "x": "0.5", "y": "0.5",
+        })
+        rendered = render_action(spec)
+        self.assertIn("[DCS: World]", rendered)
+        self.assertEqual("DCS: World", parse_action(rendered).values["target"])
+
+    def test_target_without_colon_stays_unbracketed(self):
+        spec = ActionSpec("Focus window", {"target_type": "WindowClass", "target": "DCS"})
+        rendered = render_action(spec)
+        self.assertEqual("FocusWindow:WindowClass:DCS", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

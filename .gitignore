@@ -206,3 +206,11 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 .idea
+
+# DCS Mouse Controller runtime state
+.last_config
+
+# DCS Mouse Controller build output (built with PyInstaller, not committed)
+CockpitMapper.exe
+CockpitMapper.zip
+*.bak

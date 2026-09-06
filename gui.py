@@ -186,7 +186,10 @@ class WindowPickerDialog(tk.Toplevel):
         if not selection:
             return
         class_name, title = self.tree.item(selection[0], "values")
-        if prefer_title and title:
+        if prefer_title and not title:
+            messagebox.showinfo("No title", "This window has no title - use its class instead.", parent=self)
+            return
+        if prefer_title:
             self.callback("WindowName", title)
         else:
             self.callback("WindowClass", class_name)

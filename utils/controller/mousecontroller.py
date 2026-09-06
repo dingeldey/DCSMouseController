@@ -386,18 +386,11 @@ class MouseController:
         return windows
 
     @staticmethod
-    def get_window_rect(hwnd):
-        rect = RECT()
-        user32.GetWindowRect(hwnd, ctypes.byref(rect))
-        return (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
-
-    @staticmethod
     def get_client_rect_screen(hwnd):
         """Return (x, y, w, h) of the window's client area in screen coords.
 
-        Unlike get_window_rect, this excludes the title bar and borders, so
-        a 0.5/0.5 fraction lands in the middle of the actual play area
-        instead of being pulled off-center by chrome GetWindowRect includes.
+        This excludes the title bar and borders, so a 0.5/0.5 fraction lands
+        in the middle of the actual play area.
         """
         rect = RECT()
         user32.GetClientRect(hwnd, ctypes.byref(rect))

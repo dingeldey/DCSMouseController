@@ -15,6 +15,7 @@ from utils.logger.logger import setup_logger
 import sys
 import time
 import atexit
+import configparser
 import ctypes
 import ctypes.wintypes as wt
 from pathlib import Path
@@ -113,7 +114,10 @@ def _save_last_config(path: str, log) -> None:
     try:
         _last_config_marker().write_text(path, encoding="utf-8")
     except Exception as e:
-        log.debug(f"Could not remember last-used config: {e}")
+        log.warning(
+            f"Could not remember last-used config ({e}); you'll be prompted to "
+            f"pick a profile again next run"
+        )
 
 
 def select_config_file(explicit: str | None, log):
@@ -160,12 +164,16 @@ def select_config_file(explicit: str | None, log):
 # Main runner
 # ----------------------------------------------------------------------
 def run_main(log, cfgfile):
-    cfg = IniReader(cfgfile)
+    try:
+        cfg = IniReader(cfgfile, log)
+    except (FileNotFoundError, OSError, UnicodeDecodeError, configparser.Error) as e:
+        log.error(f"Could not load config file {cfgfile}: {e}")
+        raise SystemExit(1)
 
     # List windows at startup
     list_top_level_windows(log)
 
-    input_cfg = InputConfig.from_ini(cfg)
+    input_cfg = InputConfig.from_ini(cfg, log)
     keymaps = KeyMapConfig.from_ini(cfg, log)
     axismaps = AxisMapConfig.from_ini(cfg, log)
 

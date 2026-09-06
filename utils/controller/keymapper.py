@@ -8,6 +8,8 @@ import ctypes
 import ctypes.wintypes as wt
 import time
 
+from utils.controller.keynames import vk_from_str
+
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 
 # --- constants ---
@@ -61,60 +63,6 @@ class INPUT(ctypes.Structure):
     ]
 
 
-# --- Helpers for mapping strings to VK codes ---
-def _vk_from_str(key: str) -> int:
-    """Map a string like 'A', 'F1', 'Ctrl' to a Windows virtual-key code."""
-    k = key.upper()
-
-    # single letters A–Z
-    if len(k) == 1 and "A" <= k <= "Z":
-        return ord(k)
-
-    # digits 0–9
-    if len(k) == 1 and "0" <= k <= "9":
-        return ord(k)
-
-    # function keys F1–F24
-    if k.startswith("F") and k[1:].isdigit():
-        n = int(k[1:])
-        if 1 <= n <= 24:
-            return 0x70 + (n - 1)
-
-    mapping = {
-        "CTRL": 0x11,
-        "CONTROL": 0x11,
-        "ALT": 0x12,
-        "SHIFT": 0x10,
-        "WIN": 0x5B,   # Left Windows key
-        "LWIN": 0x5B,
-        "RWIN": 0x5C,
-
-        "ENTER": 0x0D,
-        "RETURN": 0x0D,
-        "ESC": 0x1B,
-        "ESCAPE": 0x1B,
-        "SPACE": 0x20,
-        "TAB": 0x09,
-        "BACKSPACE": 0x08,
-        "BKSP": 0x08,
-        "DEL": 0x2E,
-        "DELETE": 0x2E,
-        "INS": 0x2D,
-        "INSERT": 0x2D,
-        "HOME": 0x24,
-        "END": 0x23,
-        "PGUP": 0x21,
-        "PAGEUP": 0x21,
-        "PGDN": 0x22,
-        "PAGEDOWN": 0x22,
-        "LEFT": 0x25,
-        "RIGHT": 0x27,
-        "UP": 0x26,
-        "DOWN": 0x28,
-    }
-    return mapping.get(k, 0)
-
-
 # --- Main class ---
 class KeyMapper:
     def __init__(self, log=None):
@@ -129,7 +77,7 @@ class KeyMapper:
     def key_down(self, combo: str):
         """Press a combo and keep it held (until key_up)."""
         parts = [p.strip() for p in combo.split("+") if p.strip()]
-        vks = [_vk_from_str(p) for p in parts]
+        vks = [vk_from_str(p) for p in parts]
         if not vks or any(vk == 0 for vk in vks):
             if self.log:
                 self.log.warning(f"[KEYMAPPER] Unknown key combo: {combo}")
@@ -145,7 +93,7 @@ class KeyMapper:
     def key_up(self, combo: str):
         """Release a combo that was held with key_down()."""
         parts = [p.strip() for p in combo.split("+") if p.strip()]
-        vks = [_vk_from_str(p) for p in parts]
+        vks = [vk_from_str(p) for p in parts]
         if not vks or any(vk == 0 for vk in vks):
             if self.log:
                 self.log.warning(f"[KEYMAPPER] Unknown key combo: {combo}")

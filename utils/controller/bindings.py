@@ -132,6 +132,8 @@ def parse_input(binding_str: str) -> InputBinding:
         # --- Form C: colon-separated comparator tokens (e.g. ":>:0.6" or ":<:-0.6")
         if len(parts) > offset + 2 and parts[offset + 2] in (">", ">=", "<", "<="):
             op = parts[offset + 2]
+            if len(parts) <= offset + 3:
+                raise ValueError(f"Missing threshold value after '{op}' in '{binding_str}'")
             val = float(parts[offset + 3])
             if op in (">", ">="):
                 return InputBinding(guid, device_index, "axis", axis_id,
@@ -149,8 +151,13 @@ def parse_input(binding_str: str) -> InputBinding:
         # --- Form A: legacy pos/neg/abs remains supported
         if len(parts) > offset + 2:
             mode = parts[offset + 2]
-            if mode in ("pos", "neg", "abs"):
-                thr = float(parts[offset + 3])
+            if mode not in ("pos", "neg", "abs"):
+                raise ValueError(
+                    f"Unknown axis mode '{mode}' in '{binding_str}' (expected pos, neg, or abs)"
+                )
+            if len(parts) <= offset + 3:
+                raise ValueError(f"Missing threshold value after '{mode}' in '{binding_str}'")
+            thr = float(parts[offset + 3])
 
         return InputBinding(guid, device_index, "axis", axis_id,
                             axis_mode=mode, threshold=thr,
@@ -227,34 +234,35 @@ class InputConfig:
         self.wiggle_ms = 1000
 
     @classmethod
-    def from_ini(cls, cfg):
+    def from_ini(cls, cfg, log=None):
         mod = None
         tog = None
         if cfg.cfg.has_option("input", "modifier"):
             val = cfg.get_str("input", "modifier")
             if val:
-                mod = parse_input(val)
+                try:
+                    mod = parse_input(val)
+                except (ValueError, IndexError) as e:
+                    if log:
+                        log.error(f"[BINDINGS] Invalid 'modifier' binding {val!r}: {e}; modifier layer disabled")
         if cfg.cfg.has_option("input", "button_toggle"):
             val = cfg.get_str("input", "button_toggle")
             if val:
-                tog = parse_input(val)
+                try:
+                    tog = parse_input(val)
+                except (ValueError, IndexError) as e:
+                    if log:
+                        log.error(f"[BINDINGS] Invalid 'button_toggle' binding {val!r}: {e}; toggle button disabled")
         obj = cls(mod, tog)
 
-        if cfg.cfg.has_option("input", "axis_deadzone"):
-            obj.axis_deadzone = float(cfg.get_str("input", "axis_deadzone"))
-        if cfg.cfg.has_option("input", "axis_speed"):
-            obj.axis_speed = float(cfg.get_str("input", "axis_speed"))
-        if cfg.cfg.has_option("input", "axis_mode"):
-            obj.axis_mode = cfg.get_str("input", "axis_mode")
-        if cfg.cfg.has_option("input", "axis_poll_hz"):
-            obj.axis_poll_hz = int(cfg.get_str("input", "axis_poll_hz"))
+        obj.axis_deadzone = cfg.get_float("input", "axis_deadzone", obj.axis_deadzone)
+        obj.axis_speed = cfg.get_float("input", "axis_speed", obj.axis_speed)
+        obj.axis_mode = cfg.get_str("input", "axis_mode", obj.axis_mode)
+        obj.axis_poll_hz = cfg.get_int("input", "axis_poll_hz", obj.axis_poll_hz)
 
-        if cfg.cfg.has_option("input", "debug_inputs"):
-            obj.debug_inputs = cfg.cfg.getboolean("input", "debug_inputs")
-        if cfg.cfg.has_option("input", "log_buttons"):
-            obj.log_buttons = cfg.cfg.getboolean("input", "log_buttons")
-        if cfg.cfg.has_option("input", "log_axes"):
-            obj.log_axes = cfg.cfg.getboolean("input", "log_axes")
+        obj.debug_inputs = cfg.get_bool("input", "debug_inputs", obj.debug_inputs)
+        obj.log_buttons = cfg.get_bool("input", "log_buttons", obj.log_buttons)
+        obj.log_axes = cfg.get_bool("input", "log_axes", obj.log_axes)
 
         # --- wiggle_initially_on with params ---
         if cfg.cfg.has_option("input", "wiggle_initially_on"):
@@ -279,26 +287,50 @@ class InputConfig:
 
 
 
+def _parse_mapping_entries(cfg, option_name: str, log=None) -> list[BindingMap]:
+    """Parse a 'lhs => rhs, lhs => rhs, ...' style [input] list into BindingMaps.
+
+    A single malformed entry is logged and skipped rather than aborting the
+    whole config load, so one typo doesn't take down every other binding.
+    """
+    from utils.controller.keynames import is_valid_combo
+
+    maps: list[BindingMap] = []
+    if not cfg.cfg.has_option("input", option_name):
+        return maps
+
+    # get_list() already normalizes line-continuation backslashes to spaces
+    # and splits on commas, so each entry here is exactly one "lhs => rhs".
+    for entry in cfg.get_list("input", option_name):
+        if "=>" not in entry:
+            continue
+        lhs, rhs = [x.strip() for x in entry.split("=>", 1)]
+        try:
+            inp = parse_input(lhs)
+            out = parse_output(rhs)
+        except (ValueError, IndexError) as e:
+            if log:
+                log.error(f"[BINDINGS] Skipping invalid {option_name} entry '{lhs} => {rhs}': {e}")
+            continue
+
+        if out.type == "key" and not is_valid_combo(out.value) and log:
+            log.warning(
+                f"[BINDINGS] '{rhs}' in '{lhs} => {rhs}' doesn't look like a valid key combo "
+                f"or a recognized action - check for a typo"
+            )
+
+        existing = next((bm for bm in maps if bm.input == inp), None)
+        if existing:
+            existing.outputs.append(out)
+        else:
+            maps.append(BindingMap(inp, [out]))
+    return maps
+
+
 class KeyMapConfig:
     @classmethod
     def from_ini(cls, cfg, log=None):
-        maps: list[BindingMap] = []
-        if cfg.cfg.has_option("input", "key_mappings"):
-            lines = cfg.get_list("input", "key_mappings")
-            for line in lines:
-                for entry in line.split("\\"):
-                    if "=>" not in entry:
-                        continue
-                    lhs, rhs = [x.strip() for x in entry.split("=>", 1)]
-                    inp = parse_input(lhs)
-                    out = parse_output(rhs)
-
-                    existing = next((bm for bm in maps if bm.input == inp), None)
-                    if existing:
-                        existing.outputs.append(out)
-                    else:
-                        maps.append(BindingMap(inp, [out]))
-
+        maps = _parse_mapping_entries(cfg, "key_mappings", log)
         if log:
             log.info(f"[BINDINGS] Loaded {len(maps)} key mappings")
             for bm in maps:
@@ -312,23 +344,7 @@ class KeyMapConfig:
 class AxisMapConfig:
     @classmethod
     def from_ini(cls, cfg, log=None):
-        maps: list[BindingMap] = []
-        if cfg.cfg.has_option("input", "axis_mappings"):
-            lines = cfg.get_list("input", "axis_mappings")
-            for line in lines:
-                for entry in line.split("\\"):
-                    if "=>" not in entry:
-                        continue
-                    lhs, rhs = [x.strip() for x in entry.split("=>", 1)]
-                    inp = parse_input(lhs)
-                    out = parse_output(rhs)
-
-                    existing = next((bm for bm in maps if bm.input == inp), None)
-                    if existing:
-                        existing.outputs.append(out)
-                    else:
-                        maps.append(BindingMap(inp, [out]))
-
+        maps = _parse_mapping_entries(cfg, "axis_mappings", log)
         if log:
             log.info(f"[BINDINGS] Loaded {len(maps)} axis mappings")
             for bm in maps:

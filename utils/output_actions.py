@@ -35,6 +35,24 @@ def split_action(value: str) -> list[str]:
     return parts
 
 
+def _unwrap_target(token: str) -> str:
+    """Undo _wrap_target: strip a [...] bracket a colon-bearing target was
+    protected with (split_action doesn't split inside brackets). Only strips
+    when a ':' is present inside, so a target that's naturally bracketed
+    (and colon-free) round-trips unchanged rather than losing its brackets."""
+    if token.startswith("[") and token.endswith("]") and ":" in token:
+        return token[1:-1]
+    return token
+
+
+def _wrap_target(target: str) -> str:
+    """Bracket-protect a window class/title so a literal ':' in it survives
+    the round trip through split_action/parse_action unchanged, instead of
+    being re-split into extra fields (dropping the space after the colon,
+    e.g. 'DCS: World' -> 'DCS:World')."""
+    return f"[{target}]" if ":" in target else target
+
+
 @dataclass
 class ActionSpec:
     kind: str = "Keyboard key"
@@ -70,6 +88,7 @@ def parse_action(raw: str) -> ActionSpec:
         target_type = parts[1] if len(parts) > 1 and parts[1] else "Virtual"
         coordinate_index = next((i for i, value in enumerate(parts) if value in {"frac", "px"}), -1)
         target = ":".join(parts[2:coordinate_index]) if coordinate_index > 2 else (parts[2] if len(parts) > 2 and coordinate_index < 0 else "")
+        target = _unwrap_target(target)
         coordinate_mode = parts[coordinate_index] if coordinate_index >= 0 else "frac"
         coordinate = parts[coordinate_index + 1] if coordinate_index + 1 < len(parts) else "[0.5,0.5]"
         match = re.fullmatch(r"\[\s*([^,]+)\s*,\s*([^]]+)\s*\]", coordinate)
@@ -80,7 +99,7 @@ def parse_action(raw: str) -> ActionSpec:
     if base == "FocusWindow":
         return ActionSpec("Focus window", {
             "target_type": parts[1] if len(parts) > 1 else "WindowName",
-            "target": ":".join(parts[2:]) if len(parts) > 2 else "",
+            "target": _unwrap_target(":".join(parts[2:])) if len(parts) > 2 else "",
         }, raw)
     if base == "WiggleMouse":
         return ActionSpec("Wiggle mouse", {
@@ -132,11 +151,11 @@ def render_action(spec: ActionSpec) -> str:
     if spec.kind == "Center mouse":
         target_type = values.get("target_type", "Virtual")
         target = values.get("target", "").strip()
-        target_token = f":{target}" if target else ""
+        target_token = f":{_wrap_target(target)}" if target else ""
         return (f"CenterMouse:{target_type}{target_token}:{values.get('coordinate_mode', 'frac')}:"
                 f"[{values.get('x', '0.5')},{values.get('y', '0.5')}]")
     if spec.kind == "Focus window":
-        return f"FocusWindow:{values.get('target_type', 'WindowName')}:{values.get('target', '').strip()}"
+        return f"FocusWindow:{values.get('target_type', 'WindowName')}:{_wrap_target(values.get('target', '').strip())}"
     if spec.kind == "Wiggle mouse":
         return f"WiggleMouse:{values.get('mode', 'relative')}:{values.get('pixels', '5')}:{values.get('period', '1000')}"
     if spec.kind == "Mouse increment":
