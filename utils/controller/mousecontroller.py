@@ -7,9 +7,11 @@ Windows-only. Supports VR by sending relative deltas via SendInput.
 
 import ctypes
 import ctypes.wintypes as wt
+import os
 import win32api
 
 user32 = ctypes.windll.user32
+user32.FindWindowW.restype = wt.HWND
 
 # --- Constants for input ---
 MOUSEEVENTF_MOVE = 0x0001
@@ -69,6 +71,34 @@ class MONITORINFOEX(ctypes.Structure):
 class MouseController:
     def __init__(self, log=None):
         self.log = log
+        self.set_dpi_awareness()
+
+    @staticmethod
+    def set_dpi_awareness():
+        """Make this process DPI-aware so window rects reported by other
+        processes (e.g. DCS) are accurate on multi-monitor / mixed-DPI setups.
+
+        Prefers per-monitor-v2 (Windows 10 1703+) and falls back through the
+        older APIs for earlier Windows versions.
+
+        Windows only lets a process set its DPI awareness once; call this as
+        early as possible (main.py does, before pygame.init()), since SDL's
+        video subsystem may otherwise claim a less accurate setting first.
+        Safe to call again here for callers that construct MouseController
+        without going through main.py - a second call is a harmless no-op.
+        """
+        try:
+            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = ctypes.c_void_p(-4)
+            if user32.SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2):
+                return
+        except (AttributeError, OSError):
+            pass
+        try:
+            PROCESS_PER_MONITOR_DPI_AWARE = 2
+            if ctypes.windll.shcore.SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE) == 0:
+                return
+        except (AttributeError, OSError):
+            pass
         try:
             user32.SetProcessDPIAware()
         except Exception:
@@ -129,12 +159,16 @@ class MouseController:
         user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
 
     def set_position_window_px(self, hwnd=None, title=None, class_name=None, x=0, y=0):
-        """Move mouse to absolute pixel coordinates inside a specific window."""
+        """Move mouse to absolute pixel coordinates inside a specific window's client area."""
         if hwnd is None:
             hwnd = self.find_window(title=title, class_name=class_name)
         if not hwnd:
             return
-        wx, wy, ww, wh = self.get_window_rect(hwnd)
+        wx, wy, ww, wh = self.get_client_rect_screen(hwnd)
+        if ww <= 0 or wh <= 0:
+            if self.log:
+                self.log.warning(f"[MOUSE] Window {hwnd} has no client area (minimized or gone)")
+            return
         abs_x = int(wx + min(max(x, 0), ww - 1))
         abs_y = int(wy + min(max(y, 0), wh - 1))
         self.set_position_pixels(abs_x, abs_y)
@@ -260,13 +294,73 @@ class MouseController:
         self.log.debug(f"[MOUSE] Wheel {direction}")
 
     # --- Window helpers ---
-    @staticmethod
-    def find_window(title: str = None, class_name: str = None):
-        """Find a window by title and/or class name."""
+    def find_window(self, title: str = None, class_name: str = None):
+        """Find a window by title and/or class name.
+
+        Tries an exact match first (fast path). If that fails, falls back to
+        a case-insensitive scan across all top-level windows - preferring an
+        exact (case-insensitive) match, then a substring match - since the
+        real window class/title (see the "[WIN] CLASS=... TITLE=..." lines
+        logged at startup) often differs slightly from whatever was typed
+        into the INI. This is a common reason CenterMouse/FocusWindow do
+        nothing against a game window. The fallback scan skips windows
+        belonging to this process, so it can't grab our own console; the
+        exact-match fast path above has no such exclusion.
+        """
         if not title and not class_name:
-            raise ValueError("Need at least title or class_name")
+            if self.log:
+                self.log.warning("[MOUSE] find_window called with no title or class_name")
+            return None
+
         hwnd = user32.FindWindowW(class_name, title)
-        return hwnd if hwnd else None
+        if hwnd:
+            return hwnd
+
+        title_l = title.lower() if title else None
+        class_l = class_name.lower() if class_name else None
+        own_pid = os.getpid()
+
+        exact, partial = [], []
+        for cand_hwnd, cand_class, cand_title in self.list_windows():
+            cand_class_l = cand_class.lower()
+            cand_title_l = cand_title.lower()
+
+            if class_l and class_l not in cand_class_l:
+                continue
+            if title_l and title_l not in cand_title_l:
+                continue
+
+            pid = wt.DWORD(0)
+            user32.GetWindowThreadProcessId(cand_hwnd, ctypes.byref(pid))
+            if pid.value == own_pid:
+                continue
+
+            candidate = (cand_hwnd, cand_class, cand_title)
+            if (class_l is None or class_l == cand_class_l) and (title_l is None or title_l == cand_title_l):
+                exact.append(candidate)
+            else:
+                partial.append(candidate)
+
+        candidates = exact or partial
+        if not candidates:
+            if self.log:
+                self.log.warning(
+                    f"[MOUSE] No window found matching class={class_name!r} title={title!r}"
+                )
+            return None
+
+        chosen_hwnd, chosen_class, chosen_title = candidates[0]
+        if self.log:
+            if len(candidates) > 1:
+                self.log.warning(
+                    f"[MOUSE] Multiple windows match class={class_name!r} title={title!r}; "
+                    f"using hwnd={chosen_hwnd} class={chosen_class!r} title={chosen_title!r}"
+                )
+            else:
+                self.log.debug(
+                    f"[MOUSE] Matched window hwnd={chosen_hwnd} class={chosen_class!r} title={chosen_title!r}"
+                )
+        return chosen_hwnd
 
     @staticmethod
     def list_windows():
@@ -297,12 +391,31 @@ class MouseController:
         user32.GetWindowRect(hwnd, ctypes.byref(rect))
         return (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
 
+    @staticmethod
+    def get_client_rect_screen(hwnd):
+        """Return (x, y, w, h) of the window's client area in screen coords.
+
+        Unlike get_window_rect, this excludes the title bar and borders, so
+        a 0.5/0.5 fraction lands in the middle of the actual play area
+        instead of being pulled off-center by chrome GetWindowRect includes.
+        """
+        rect = RECT()
+        user32.GetClientRect(hwnd, ctypes.byref(rect))
+        pt = wt.POINT(0, 0)
+        user32.ClientToScreen(hwnd, ctypes.byref(pt))
+        return (pt.x, pt.y, rect.right - rect.left, rect.bottom - rect.top)
+
     def set_position_window_frac(self, hwnd=None, title=None, class_name=None, fx=0.5, fy=0.5):
+        """Move mouse to a fraction of a specific window's client area."""
         if hwnd is None:
             hwnd = self.find_window(title=title, class_name=class_name)
         if not hwnd:
             return
-        x,y,w,h = self.get_window_rect(hwnd)
+        x, y, w, h = self.get_client_rect_screen(hwnd)
+        if w <= 0 or h <= 0:
+            if self.log:
+                self.log.warning(f"[MOUSE] Window {hwnd} has no client area (minimized or gone)")
+            return
         abs_x = int(x + fx * w)
         abs_y = int(y + fy * h)
         self.set_position_pixels(abs_x, abs_y)

@@ -33,6 +33,7 @@ class InputDetector:
         self.bindings = bindings
         self.state_cache: Dict[Tuple, bool] = {}
         self._last_mod_on: Optional[bool] = None
+        self._warned_invalid_index: set = set()
 
         pygame.init()
         pygame.joystick.init()
@@ -156,6 +157,21 @@ class InputDetector:
 
         return False
 
+    def _warn_invalid_index_once(self, bm, kind: str, index: int, num: int):
+        """Warn about a binding whose button/axis index doesn't exist on its
+        device. Always surfaced (misconfigured INIs shouldn't need
+        debug_inputs to be visible) but only once per binding, since poll()
+        runs every frame and would otherwise spam the log forever."""
+        key = id(bm)
+        if key in self._warned_invalid_index:
+            return
+        self._warned_invalid_index.add(key)
+        device = bm.input.device_guid or bm.input.device_index
+        self.log.warning(
+            f"[DETECTOR] Invalid {kind} index {index} for device {device} "
+            f"(has {num}) binding={bm} - check this binding's index in your INI"
+        )
+
     # ------------------------------------------------------------------
     # Poll
     # ------------------------------------------------------------------
@@ -203,11 +219,7 @@ class InputDetector:
             if ib.input_type == "button":
                 num = js.get_numbuttons()
                 if ib.input_id < 0 or ib.input_id >= num:
-                    if self.input_cfg.debug_inputs:
-                        self.log.warning(
-                            f"[DETECTOR] Invalid button index {ib.input_id} "
-                            f"for device {ib.device_index} (has {num}) binding={bm}"
-                        )
+                    self._warn_invalid_index_once(bm, "button", ib.input_id, num)
                     continue
                 state = js.get_button(ib.input_id) == 1
 
@@ -215,11 +227,7 @@ class InputDetector:
             elif ib.input_type == "axis" and ib.axis_mode:
                 num = js.get_numaxes()
                 if ib.input_id < 0 or ib.input_id >= num:
-                    if self.input_cfg.debug_inputs:
-                        self.log.warning(
-                            f"[DETECTOR] Invalid axis index {ib.input_id} "
-                            f"for device {ib.device_index} (has {num}) binding={bm}"
-                        )
+                    self._warn_invalid_index_once(bm, "axis", ib.input_id, num)
                     continue
                 val = js.get_axis(ib.input_id)
                 state = False
@@ -234,11 +242,7 @@ class InputDetector:
             elif ib.input_type == "axis" and not ib.axis_mode:
                 num = js.get_numaxes()
                 if ib.input_id < 0 or ib.input_id >= num:
-                    if self.input_cfg.debug_inputs:
-                        self.log.warning(
-                            f"[DETECTOR] Invalid axis index {ib.input_id} "
-                            f"for device {ib.device_index} (has {num}) binding={bm}"
-                        )
+                    self._warn_invalid_index_once(bm, "axis", ib.input_id, num)
                     continue
                 val = js.get_axis(ib.input_id)
                 # Continuous axis: emit every frame (already layer-gated above)

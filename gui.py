@@ -50,6 +50,34 @@ def controller_matches(token: str, devices: list[ControllerDevice]) -> bool:
     return False
 
 
+def list_open_windows() -> list[tuple[int, str, str]]:
+    """Return (hwnd, class_name, title) for real top-level app windows.
+
+    Excludes owned windows and WS_EX_TOOLWINDOW ones (tooltips, tray icons,
+    etc.) so the picker isn't dominated by blank-title system noise.
+    Window enumeration is a Windows-only ctypes API, so the import is kept
+    lazy here rather than at module load - this keeps the GUI importable
+    (e.g. for tests) on platforms that don't have it.
+    """
+    try:
+        import ctypes
+        from utils.controller.mousecontroller import MouseController
+    except Exception as exc:
+        raise RuntimeError(f"Window listing is only available on Windows ({exc}).") from exc
+
+    user32 = ctypes.windll.user32
+    GW_OWNER = 4
+    GWL_EXSTYLE = -20
+    WS_EX_TOOLWINDOW = 0x00000080
+
+    def is_real_app_window(hwnd) -> bool:
+        if user32.GetWindow(hwnd, GW_OWNER):
+            return False
+        return not (user32.GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW)
+
+    return [w for w in MouseController.list_windows() if is_real_app_window(w[0])]
+
+
 class KeyCaptureDialog(tk.Toplevel):
     KEY_NAMES = {
         "Return": "Enter", "Escape": "Esc", "Prior": "PgUp", "Next": "PgDn",
@@ -96,6 +124,73 @@ class KeyCaptureDialog(tk.Toplevel):
         self.callback("+".join(parts))
         self.destroy()
         return "break"
+
+
+class WindowPickerDialog(tk.Toplevel):
+    """Lets a binding target a live window instead of guessing its class/title.
+
+    Matching (CenterMouse/FocusWindow) is case-insensitive and accepts a
+    partial match, so whichever string is picked here doesn't need to be
+    the whole class/title - but a window's title can change at runtime
+    (e.g. a sim showing FPS or the current mission), while its class
+    almost never does, so class is the safer default.
+    """
+
+    def __init__(self, parent, callback):
+        super().__init__(parent)
+        self.callback = callback
+        self.title("Pick a window")
+        self.geometry("640x420")
+        self.configure(bg=Palette.BG)
+        self.transient(parent)
+        self.grab_set()
+
+        tk.Label(self, text="Select an open window, then choose whether to match it by class or by title.\n"
+                             "Tip: class is usually more stable than title for game windows.",
+                 bg=Palette.BG, fg=Palette.MUTED, justify="left", wraplength=600).pack(fill="x", padx=16, pady=(16, 8))
+
+        table = tk.Frame(self, bg=Palette.BG)
+        table.pack(fill="both", expand=True, padx=16)
+        self.tree = ttk.Treeview(table, columns=("class", "title"), show="headings", selectmode="browse")
+        self.tree.heading("class", text="Class")
+        self.tree.heading("title", text="Title")
+        self.tree.column("class", width=220, anchor="w")
+        self.tree.column("title", width=360, anchor="w")
+        scroll = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self.tree.bind("<Double-1>", lambda _event: self._use(prefer_title=False))
+
+        footer = tk.Frame(self, bg=Palette.BG)
+        footer.pack(fill="x", padx=16, pady=16)
+        ttk.Button(footer, text="Refresh", command=self._refresh).pack(side="left")
+        ttk.Button(footer, text="Cancel", command=self.destroy).pack(side="right")
+        ttk.Button(footer, text="Use class", command=lambda: self._use(prefer_title=False)).pack(side="right", padx=(0, 10))
+        ttk.Button(footer, text="Use title", command=lambda: self._use(prefer_title=True)).pack(side="right", padx=(0, 10))
+
+        self._refresh()
+
+    def _refresh(self):
+        self.tree.delete(*self.tree.get_children())
+        try:
+            windows = list_open_windows()
+        except Exception as exc:
+            messagebox.showerror("Can't list windows", str(exc), parent=self)
+            return
+        for hwnd, class_name, title in sorted(windows, key=lambda w: (w[2] or "").lower()):
+            self.tree.insert("", "end", iid=str(hwnd), values=(class_name, title))
+
+    def _use(self, prefer_title: bool):
+        selection = self.tree.selection()
+        if not selection:
+            return
+        class_name, title = self.tree.item(selection[0], "values")
+        if prefer_title and title:
+            self.callback("WindowName", title)
+        else:
+            self.callback("WindowClass", class_name)
+        self.destroy()
 
 
 class BindingDialog(tk.Toplevel):
@@ -239,6 +334,7 @@ class BindingDialog(tk.Toplevel):
         elif kind == "Center mouse":
             self._output_field(0, "Target type", v["target_type"], ("Virtual", "Monitor", "WindowClass", "WindowName"))
             self._output_field(1, "Target name / monitor", v["target"])
+            ttk.Button(self.output_options, text="🪟  Pick window…", command=self._pick_window).grid(row=1, column=2, padx=(8, 0))
             self._output_field(2, "Coordinate units", v["coordinate_mode"], ("frac", "px"))
             self._output_field(3, "X coordinate", v["x"])
             self._output_field(4, "Y coordinate", v["y"])
@@ -246,7 +342,8 @@ class BindingDialog(tk.Toplevel):
         elif kind == "Focus window":
             self._output_field(0, "Match window by", v["target_type"], ("WindowClass", "WindowName"))
             self._output_field(1, "Class or title", v["target"])
-            help_text = "Brings the first window matching this exact class or title to the foreground."
+            ttk.Button(self.output_options, text="🪟  Pick window…", command=self._pick_window).grid(row=1, column=2, padx=(8, 0))
+            help_text = "Brings the first matching window to the foreground. Matching is case-insensitive and accepts part of the class or title."
         elif kind == "Wiggle mouse":
             self._output_field(0, "Movement mode", v["wiggle_mode"], ("relative", "absolute"))
             self._output_field(1, "Distance (pixels)", v["pixels"])
@@ -363,6 +460,14 @@ class BindingDialog(tk.Toplevel):
     def _capture_key(self):
         self.output_type_var.set("Keyboard key")
         KeyCaptureDialog(self, lambda key: self.output_vars["shortcut"].set(key))
+
+    def _pick_window(self):
+        def apply(target_type, target):
+            self.output_vars["target_type"].set(target_type)
+            self.output_vars["target"].set(target)
+            self._output_type_changed()
+
+        WindowPickerDialog(self, apply)
 
     def _listen(self):
         device = self._selected_device()

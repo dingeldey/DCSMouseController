@@ -14,6 +14,7 @@ from utils.logger.logger import setup_logger
 
 import sys
 import time
+import atexit
 import ctypes
 import ctypes.wintypes as wt
 from pathlib import Path
@@ -26,17 +27,22 @@ def check_single_instance(mutex_name="DCSMouseControllerMutex"):
     """Ensure only one instance of this program runs."""
     kernel32 = ctypes.windll.kernel32
     kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_bool
     handle = kernel32.CreateMutexW(None, False, mutex_name)
 
     # ERROR_ALREADY_EXISTS = 183
     last_error = kernel32.GetLastError()
     if last_error == 183:
+        kernel32.CloseHandle(handle)
         print("Another instance is already running.")
-
-
         print("Press any key to exit...")
         msvcrt.getch()
         sys.exit(1)
+
+    # Release the mutex deterministically on exit instead of relying on the
+    # OS to reclaim it at process teardown.
+    atexit.register(kernel32.CloseHandle, handle)
 
 # ----------------------------------------------------------------------
 # Window lister helper
@@ -89,8 +95,32 @@ def list_top_level_windows(log):
 # ----------------------------------------------------------------------
 # Config selector
 # ----------------------------------------------------------------------
+def _last_config_marker() -> Path:
+    return app_dir() / ".last_config"
+
+
+def _load_last_config(log) -> str | None:
+    try:
+        return _last_config_marker().read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+    except Exception as e:
+        log.debug(f"Could not read last-used config marker: {e}")
+        return None
+
+
+def _save_last_config(path: str, log) -> None:
+    try:
+        _last_config_marker().write_text(path, encoding="utf-8")
+    except Exception as e:
+        log.debug(f"Could not remember last-used config: {e}")
+
+
 def select_config_file(explicit: str | None, log):
     if explicit:
+        # Resolve so a relative --config still matches the absolute paths
+        # ini_files/last_config compare against on a later run.
+        _save_last_config(str(Path(explicit).resolve()), log)
         return explicit
 
     # Look for *.ini files next to the application
@@ -101,9 +131,16 @@ def select_config_file(explicit: str | None, log):
 
     if len(ini_files) == 1:
         log.info(f"Found only one config: {ini_files[0]}")
+        _save_last_config(str(ini_files[0]), log)
         return str(ini_files[0])
 
-    # Multiple INIs → let user choose
+    # Multiple INIs → reuse the last-selected one if it's still present
+    last = _load_last_config(log)
+    if last and any(str(f) == last for f in ini_files):
+        log.info(f"Using last-selected config: {last} (pass --config to pick a different one)")
+        return last
+
+    # Otherwise let the user choose
     print("\nAvailable config files:")
     for idx, f in enumerate(ini_files, start=1):
         print(f"  {idx}. {f.name}")
@@ -111,7 +148,9 @@ def select_config_file(explicit: str | None, log):
         try:
             choice = int(input("Select config file [1-{}]: ".format(len(ini_files))))
             if 1 <= choice <= len(ini_files):
-                return str(ini_files[choice - 1])
+                chosen = str(ini_files[choice - 1])
+                _save_last_config(chosen, log)
+                return chosen
         except Exception:
             pass
         print("Invalid choice, try again.")
@@ -178,7 +217,11 @@ def main():
     )
     log.info("Starting DCS Mouse Controller")
 
-    # 3) Early device dump (before INI selection)
+    # 3) Claim DPI awareness before anything creates a window (SDL/pygame
+    #    included) - Windows only allows this to be set once per process.
+    MouseController.set_dpi_awareness()
+
+    # 4) Early device dump (before INI selection)
     try:
         import pygame
         pygame.init()
@@ -216,7 +259,7 @@ def main():
     except Exception as e:
         log.warning(f"[DEVICE] Enumeration failed: {e}")
 
-    # 4) Now select INI and run
+    # 5) Now select INI and run
     cfgfile = select_config_file(args.config, log)
     run_main(log, cfgfile)
 
