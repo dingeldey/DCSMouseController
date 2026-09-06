@@ -44,3 +44,46 @@ wheel acceleration, analog cursor axes, cursor centering, window focus, mouse
 wiggle, and accelerated cursor increments. Each action includes a short
 explanation. **Advanced / raw** remains available for hand-written action
 strings.
+
+## Build a standalone executable
+
+Building must happen on Windows — PyInstaller cannot cross-compile. Install it
+once, then build from `app.py`:
+
+```powershell
+py -m pip install pyinstaller
+py -m PyInstaller --onefile --noconsole --name CockpitMapper --hidden-import main --hidden-import gui --noconfirm app.py
+```
+
+Inside a virtual environment, use `.venv\Scripts\pyinstaller.exe` with the same
+arguments instead.
+
+The result is a single `dist\CockpitMapper.exe`, roughly 20 MB. `app.py` is the
+entry point because the executable contains both halves of the application: run
+normally it opens the GUI, and the GUI re-launches the same executable with a
+`--run-mapper` flag to start the runtime as a child process.
+
+Copy the INI profiles next to the executable when distributing it:
+
+```
+CockpitMapper.exe
+bms.ini
+dcs_f16.ini
+dcsf-18.ini
+```
+
+Profiles are deliberately not bundled into the executable, because the GUI has
+to be able to save them. The executable reads `*.ini` from its own directory, so
+the profile dropdown is empty if the exe is copied out on its own. Place it in a
+writable location — not `Program Files` — since `log.log` is written alongside
+it.
+
+The command above regenerates `CockpitMapper.spec`. Passing that spec file to
+PyInstaller instead of the arguments produces the same build:
+
+```powershell
+py -m PyInstaller CockpitMapper.spec --noconfirm
+```
+
+PyInstaller caches aggressively. If a source change does not take effect, delete
+`build\` and `dist\` and build again, or add `--clean`.

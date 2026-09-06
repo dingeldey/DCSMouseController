@@ -11,12 +11,13 @@ import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from utils.app_paths import app_dir, is_frozen
 from utils.config_editor import ConfigDocument, MappingRow
 from utils.controller.devices import ControllerDevice, ControllerService
 from utils.output_actions import ACTION_TYPES, ActionSpec, describe_action, parse_action, render_action
 
 
-APP_DIR = Path(__file__).resolve().parent
+APP_DIR = app_dir()
 
 
 class Palette:
@@ -815,9 +816,29 @@ class ControllerMapperApp:
         self.save_button.configure(text="Save changes")
         self.status_var.set(f"Saved {self.document.path.name} · backup: {backup.name if backup else 'none'}")
 
+    def _terminate_runtime(self):
+        """Stop the mapper child process.
+
+        A one-file build runs the mapper as a bootloader parent plus a real
+        child process, so terminating only the parent would leave the mapper
+        alive and still grabbing input. Kill the whole tree instead.
+        """
+        process = self.runtime_process
+        if not process or process.poll() is not None:
+            return
+        if is_frozen():
+            try:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                               capture_output=True, timeout=5,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                return
+            except Exception:
+                pass  # fall through to a plain terminate
+        process.terminate()
+
     def toggle_runtime(self):
         if self.runtime_process and self.runtime_process.poll() is None:
-            self.runtime_process.terminate()
+            self._terminate_runtime()
             self.runtime_process = None
             self.runtime_button.configure(text="▶  Start mapper")
             self.status_var.set("Mapper stopped")
@@ -829,7 +850,12 @@ class ControllerMapperApp:
             if self.dirty:
                 return
         try:
-            self.runtime_process = subprocess.Popen([sys.executable, str(APP_DIR / "main.py"), "--config", str(self.document.path)], cwd=APP_DIR)
+            if is_frozen():
+                # The mapper lives in this same executable; re-launch it via the sentinel.
+                command = [sys.executable, "--run-mapper", "--config", str(self.document.path)]
+            else:
+                command = [sys.executable, str(APP_DIR / "main.py"), "--config", str(self.document.path)]
+            self.runtime_process = subprocess.Popen(command, cwd=APP_DIR)
         except Exception as exc:
             messagebox.showerror("Could not start mapper", str(exc), parent=self.root)
             return
@@ -856,7 +882,7 @@ class ControllerMapperApp:
                 if self.dirty:
                     return
         if self.runtime_process and self.runtime_process.poll() is None:
-            self.runtime_process.terminate()
+            self._terminate_runtime()
         self.root.destroy()
 
 

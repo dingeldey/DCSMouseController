@@ -6,6 +6,7 @@ main.py - Entry point for DCS Mouse Controller
 from utils.controller.detector import InputDetector
 from utils.controller.executor import InputExecutor
 from utils.controller.bindings import InputConfig, KeyMapConfig, AxisMapConfig
+from utils.app_paths import app_dir
 from utils.file.inireader import IniReader
 from utils.controller.keymapper import KeyMapper
 from utils.controller.mousecontroller import MouseController
@@ -92,10 +93,10 @@ def select_config_file(explicit: str | None, log):
     if explicit:
         return explicit
 
-    # Look for *.ini files in current directory
-    ini_files = sorted(Path(".").glob("*.ini"))
+    # Look for *.ini files next to the application
+    ini_files = sorted(app_dir().glob("*.ini"))
     if not ini_files:
-        log.error("No INI configuration files found in current directory.")
+        log.error(f"No INI configuration files found in {app_dir()}.")
         raise SystemExit(1)
 
     if len(ini_files) == 1:
