@@ -47,7 +47,19 @@ strings.
 
 ## Build a standalone executable
 
-Building must happen on Windows — PyInstaller cannot cross-compile. Install it
+Building must happen on Windows — PyInstaller cannot cross-compile. The
+one-step path is `build.bat`: it checks the project `.venv` (creating it if
+absent, repairing it if incomplete), then builds the exe from the checked-in
+`CockpitMapper.spec`. Flags:
+
+- `--recreate` — delete and rebuild `.venv` from scratch (prompts for
+  confirmation unless this flag is given)
+- `--clean` — pass `--clean` through to PyInstaller, the fix for stale caches
+- `--no-pause` — do not wait for a keypress at the end, for scripted/
+  non-interactive runs
+- `-h` / `--help` — usage
+
+The commands below are the manual, documented fallback. Install PyInstaller
 once, then build from `app.py`:
 
 ```powershell
@@ -55,8 +67,11 @@ py -m pip install pyinstaller
 py -m PyInstaller --onefile --noconsole --name CockpitMapper --hidden-import main --hidden-import gui --noconfirm app.py
 ```
 
-Inside a virtual environment, use `.venv\Scripts\pyinstaller.exe` with the same
-arguments instead.
+Inside a virtual environment, use `.venv\Scripts\python.exe -m PyInstaller`
+with the same arguments instead — not `.venv\Scripts\pyinstaller.exe`, whose
+console-script shim embeds the absolute path of the venv that created it
+(verified: it contains `F:\arbeit\python\gaming\DCSMouseController\.venv\Scripts\python.exe`)
+and breaks if the repo is moved, whereas `python.exe -m` keeps working.
 
 The result is a single `dist\CockpitMapper.exe`, roughly 20 MB. `app.py` is the
 entry point because the executable contains both halves of the application: run

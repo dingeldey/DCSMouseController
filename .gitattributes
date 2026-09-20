@@ -1,0 +1,2 @@
+# goto/label seeking in .bat files is unreliable with LF-only line endings
+*.bat text eol=crlf

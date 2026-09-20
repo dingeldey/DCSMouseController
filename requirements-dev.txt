@@ -1,0 +1,2 @@
+# Build-time-only dependencies. See build.bat.
+pyinstaller>=6.22,<7
