@@ -223,6 +223,7 @@ class InputConfig:
         self.axis_deadzone = 0.05
         self.axis_speed = 400
         self.axis_mode = "relative"
+        self.center_mode = "absolute"
         self.axis_poll_hz = 250
         # Debug
         self.debug_inputs = False
@@ -258,6 +259,15 @@ class InputConfig:
         obj.axis_deadzone = cfg.get_float("input", "axis_deadzone", obj.axis_deadzone)
         obj.axis_speed = cfg.get_float("input", "axis_speed", obj.axis_speed)
         obj.axis_mode = cfg.get_str("input", "axis_mode", obj.axis_mode)
+
+        raw_center_mode = cfg.get_str("input", "center_mode", obj.center_mode)
+        center_mode = raw_center_mode.strip().lower()
+        if center_mode in ("absolute", "relative"):
+            obj.center_mode = center_mode
+        else:
+            if log:
+                log.warning(f"[BINDINGS] [input] center_mode = {raw_center_mode!r} is not valid; using default {obj.center_mode}")
+
         obj.axis_poll_hz = cfg.get_int("input", "axis_poll_hz", obj.axis_poll_hz)
 
         obj.debug_inputs = cfg.get_bool("input", "debug_inputs", obj.debug_inputs)

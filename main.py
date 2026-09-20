@@ -179,7 +179,7 @@ def run_main(log, cfgfile):
 
     detector = InputDetector(log, input_cfg, keymaps + axismaps)
     keymapper = KeyMapper(log)
-    mouse = MouseController(log)
+    mouse = MouseController(log, center_mode=input_cfg.center_mode)
     executor = InputExecutor(log, keymapper, mouse, input_cfg)
 
     # Count invalid bindings (device not found)

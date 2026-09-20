@@ -128,6 +128,43 @@ class InputConfigModifierToleranceTests(_LoggingTestCase):
         self.assertEqual(7, obj.modifier.input_id)  # 1-based in INI -> 0-based
 
 
+class InputConfigCenterModeTests(_LoggingTestCase):
+    def test_missing_option_defaults_to_absolute(self):
+        path = self._write_ini(
+            "[input]\n"
+            "modifier = dev:0:button:8\n"
+        )
+        log, _ = self._make_logger()
+        cfg = IniReader(path, log)
+        obj = InputConfig.from_ini(cfg, log)
+
+        self.assertEqual("absolute", obj.center_mode)
+
+    def test_relative_is_accepted_case_insensitively(self):
+        path = self._write_ini(
+            "[input]\n"
+            "center_mode = Relative\n"
+        )
+        log, _ = self._make_logger()
+        cfg = IniReader(path, log)
+        obj = InputConfig.from_ini(cfg, log)
+
+        self.assertEqual("relative", obj.center_mode)
+
+    def test_bad_value_falls_back_to_absolute_and_warns(self):
+        path = self._write_ini(
+            "[input]\n"
+            "center_mode = sideways\n"
+        )
+        log, handler = self._make_logger()
+        cfg = IniReader(path, log)
+        obj = InputConfig.from_ini(cfg, log)
+
+        self.assertEqual("absolute", obj.center_mode)
+        warnings = [r for r in handler.records if r.levelno == logging.WARNING]
+        self.assertTrue(any("center_mode" in r.getMessage() for r in warnings))
+
+
 class IniReaderBomTests(unittest.TestCase):
     def test_utf8_bom_does_not_break_loading(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".ini", delete=False)

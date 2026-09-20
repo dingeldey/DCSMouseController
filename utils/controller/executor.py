@@ -308,7 +308,7 @@ class InputExecutor:
 
         if ttype == "Virtual":
             if px is not None:
-                self.mousecontroller.set_position_pixels(px, py)
+                self.mousecontroller.center_at_pixels(px, py)
             else:
                 self.mousecontroller.set_position_frac(fx, fy)
 

@@ -35,19 +35,53 @@ class Palette:
 
 
 def compact_device(token: str) -> str:
-    if len(token) <= 34:
-        return token
+    # Elide GUID-like tokens first: a 32 hex character pygame GUID is under the
+    # plain length limit but still too wide for the ID columns.
     if re.fullmatch(r"[0-9a-fA-F-]{20,}", token):
         return f"{token[:10]}…{token[-8:]}"
+    if len(token) <= 34:
+        return token
     return token[:31] + "…"
 
 
-def controller_matches(token: str, devices: list[ControllerDevice]) -> bool:
+def find_controllers(token: str, devices: list[ControllerDevice]) -> list[ControllerDevice]:
     folded = token.strip().casefold()
-    for device in devices:
-        if folded in {str(device.index).casefold(), device.guid.casefold(), device.name.casefold()}:
-            return True
-    return False
+    return [
+        device
+        for device in devices
+        if folded in {str(device.index).casefold(), device.guid.casefold(), device.name.casefold()}
+    ]
+
+
+def find_controller(token: str, devices: list[ControllerDevice]) -> ControllerDevice | None:
+    return next(iter(find_controllers(token, devices)), None)
+
+
+def controller_matches(token: str, devices: list[ControllerDevice]) -> bool:
+    return find_controller(token, devices) is not None
+
+
+def describe_device(token: str, devices: list[ControllerDevice]) -> tuple[str, str]:
+    """Split a profile device reference into (name, id) display columns.
+
+    A connected controller supplies both values no matter which one the profile
+    used. Two identical controllers share a name, though, so a name token can
+    match several devices: when their GUIDs disagree the ID is left blank
+    rather than naming one of them arbitrarily. For a missing controller only
+    the token itself is known, so it goes in the column it looks like and the
+    other column is left blank.
+    """
+    matches = find_controllers(token, devices)
+    token = token.strip()
+    guid_like = bool(re.fullmatch(r"[0-9a-fA-F-]{20,}|index-\d+|\d+", token))
+    if matches:
+        guids = {device.guid for device in matches}
+        if len(guids) == 1:
+            return matches[0].name, matches[0].guid
+        return matches[0].name, token if guid_like else ""
+    if guid_like:
+        return "Unknown device", token
+    return token, ""
 
 
 def list_open_windows() -> list[tuple[int, str, str]]:
@@ -341,7 +375,7 @@ class BindingDialog(tk.Toplevel):
             self._output_field(2, "Coordinate units", v["coordinate_mode"], ("frac", "px"))
             self._output_field(3, "X coordinate", v["x"])
             self._output_field(4, "Y coordinate", v["y"])
-            help_text = "Fraction coordinates run from 0.0 to 1.0; [0.5, 0.5] is the center. Pixel coordinates are absolute within the target."
+            help_text = "Fraction coordinates run from 0.0 to 1.0; [0.5, 0.5] is the center. Pixel coordinates are absolute within the target. Set \"Center mode\" to relative in Profile settings if the game ignores the move (e.g. DCS in VR); relative mode needs Windows \"Enhance pointer precision\" off and the default pointer speed."
         elif kind == "Focus window":
             self._output_field(0, "Match window by", v["target_type"], ("WindowClass", "WindowName"))
             self._output_field(1, "Class or title", v["target"])
@@ -375,7 +409,7 @@ class BindingDialog(tk.Toplevel):
         match = re.match(r"^dev:([^:]+):(button|axis):(.+?)(:M)?$", self.row.input, re.I)
         if match:
             token, kind, detail, modified = match.groups()
-            matching = next((d for d in self.devices if token.casefold() in {d.guid.casefold(), d.name.casefold(), str(d.index)}), None)
+            matching = find_controller(token, self.devices)
             self.device_var.set(matching.label if matching else f"Missing device  ·  {token}")
             self.modified_var.set(bool(modified))
             if kind.lower() == "button":
@@ -696,10 +730,10 @@ class ControllerMapperApp:
         ttk.Button(toolbar, text="Delete", style="Danger.TButton", command=self.delete_binding).pack(side="right")
         tree_frame = tk.Frame(tab, bg=Palette.SURFACE)
         tree_frame.pack(fill="both", expand=True, padx=14, pady=(0, 14))
-        columns = ("device", "input", "output", "layer", "status")
+        columns = ("device", "id", "input", "output", "layer", "status")
         self.binding_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="browse")
-        headings = {"device": "CONTROLLER", "input": "INPUT", "output": "OUTPUT ACTION", "layer": "LAYER", "status": "STATUS"}
-        widths = {"device": 235, "input": 135, "output": 310, "layer": 75, "status": 100}
+        headings = {"device": "CONTROLLER", "id": "ID", "input": "INPUT", "output": "OUTPUT ACTION", "layer": "LAYER", "status": "STATUS"}
+        widths = {"device": 200, "id": 150, "input": 100, "output": 250, "layer": 70, "status": 85}
         for column in columns:
             self.binding_tree.heading(column, text=headings[column])
             self.binding_tree.column(column, width=widths[column], minwidth=60, stretch=column in {"device", "output"})
@@ -717,11 +751,16 @@ class ControllerMapperApp:
                  font=("Segoe UI Semibold", 15)).pack(anchor="w", padx=20, pady=(20, 3))
         tk.Label(tab, text="Select an old device reference, choose the currently connected controller, and update every matching binding.",
                  bg=Palette.SURFACE, fg=Palette.MUTED, font=("Segoe UI", 9)).pack(anchor="w", padx=20, pady=(0, 14))
-        self.device_tree = ttk.Treeview(tab, columns=("reference", "state"), show="headings", height=8, selectmode="browse")
-        self.device_tree.heading("reference", text="PROFILE DEVICE REFERENCE")
+        self.device_tree = ttk.Treeview(tab, columns=("reference", "name", "id", "state"), show="headings", height=8,
+                                        selectmode="browse")
+        self.device_tree.heading("reference", text="PROFILE REFERENCE")
+        self.device_tree.heading("name", text="CONTROLLER")
+        self.device_tree.heading("id", text="ID")
         self.device_tree.heading("state", text="STATE")
-        self.device_tree.column("reference", width=640)
-        self.device_tree.column("state", width=130, anchor="center")
+        self.device_tree.column("reference", width=280)
+        self.device_tree.column("name", width=260)
+        self.device_tree.column("id", width=170)
+        self.device_tree.column("state", width=100, anchor="center")
         self.device_tree.pack(fill="both", expand=True, padx=20)
         self.device_tree.tag_configure("missing", foreground=Palette.WARNING)
         repair = tk.Frame(tab, bg=Palette.SURFACE)
@@ -742,11 +781,13 @@ class ControllerMapperApp:
             "axis_mode": tk.StringVar(value="relative"), "axis_deadzone": tk.StringVar(value="0.05"),
             "axis_speed": tk.StringVar(value="400"), "axis_poll_hz": tk.StringVar(value="250"),
             "modifier": tk.StringVar(), "wiggle_initially_on": tk.StringVar(value="false:5:1000"),
+            "center_mode": tk.StringVar(value="absolute"),
         }
         for variable in self.setting_vars.values():
             variable.trace_add("write", self._settings_changed)
         fields = (
             ("Axis mode", "axis_mode", ("relative", "absolute")),
+            ("Center mode", "center_mode", ("absolute", "relative")),
             ("Axis deadzone", "axis_deadzone", None), ("Axis speed", "axis_speed", None),
             ("Polling rate (Hz)", "axis_poll_hz", None), ("Global modifier", "modifier", None),
             ("Wiggle startup", "wiggle_initially_on", None),
@@ -804,7 +845,7 @@ class ControllerMapperApp:
         self._loading_settings = True
         try:
             for key, variable in self.setting_vars.items():
-                defaults = {"axis_mode": "relative", "axis_deadzone": "0.05", "axis_speed": "400", "axis_poll_hz": "250", "wiggle_initially_on": "false:5:1000"}
+                defaults = {"axis_mode": "relative", "center_mode": "absolute", "axis_deadzone": "0.05", "axis_speed": "400", "axis_poll_hz": "250", "wiggle_initially_on": "false:5:1000"}
                 variable.set(self.document.get(key, defaults.get(key, "")))
         finally:
             self._loading_settings = False
@@ -833,8 +874,9 @@ class ControllerMapperApp:
             connected = controller_matches(row.device, self.devices)
             if not connected:
                 missing += 1
+            name, device_id = describe_device(row.device, self.devices)
             self.binding_tree.insert("", "end", iid=str(index), values=(
-                compact_device(row.device), row.input_label, describe_action(row.output),
+                compact_device(name), compact_device(device_id), row.input_label, describe_action(row.output),
                 "Modified" if row.modified else "Base", "Connected" if connected else "Missing",
             ), tags=(() if connected else ("missing",)))
         self.mapping_count_var.set(str(len(self.rows)))
@@ -846,7 +888,10 @@ class ControllerMapperApp:
         if self.document:
             for index, ref in enumerate(self.document.referenced_devices(self.rows)):
                 connected = controller_matches(ref, self.devices)
-                self.device_tree.insert("", "end", iid=f"device-{index}", values=(ref, "Connected" if connected else "Missing"),
+                name, device_id = describe_device(ref, self.devices)
+                self.device_tree.insert("", "end", iid=f"device-{index}", text=ref,
+                                        values=(ref, name, compact_device(device_id),
+                                                "Connected" if connected else "Missing"),
                                         tags=(() if connected else ("missing",)))
 
     def _selected_row_index(self):
@@ -901,7 +946,7 @@ class ControllerMapperApp:
         if not selection or not target or not self.document:
             messagebox.showinfo("Select devices", "Select a profile reference and a connected replacement controller.", parent=self.root)
             return
-        old = self.device_tree.item(selection[0], "values")[0]
+        old = self.device_tree.item(selection[0], "text")
         if old == target.guid:
             return
         count = self.document.remap_device(old, target.guid, self.rows)

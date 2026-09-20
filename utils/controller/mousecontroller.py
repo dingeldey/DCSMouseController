@@ -2,12 +2,14 @@
 """
 mousecontroller.py
 Utility for controlling the mouse (absolute, relative, monitor/window aware).
-Windows-only. Supports VR by sending relative deltas via SendInput.
+Windows-only. Supports VR by sending relative deltas via SendInput, including
+an opt-in relative centering mode for games that integrate mouse deltas.
 """
 
 import ctypes
 import ctypes.wintypes as wt
 import os
+import time
 import win32api
 
 user32 = ctypes.windll.user32
@@ -69,8 +71,20 @@ class MONITORINFOEX(ctypes.Structure):
 
 # --- Mouse Controller ---
 class MouseController:
-    def __init__(self, log=None):
+    def __init__(self, log=None, center_mode: str = "absolute"):
+        """center_mode selects how CenterMouse places the cursor:
+
+        "absolute" - a single SetCursorPos warp (default, cheapest).
+        "relative" - synthesise the placement from SendInput relative moves,
+                     so a game that integrates raw mouse deltas for its own
+                     cursor (DCS in VR) follows along; see center_at_pixels.
+
+        Anything unrecognised falls back to "absolute" - this class is also
+        constructed without an InputConfig to validate the value first.
+        """
         self.log = log
+        mode = str(center_mode).strip().lower() if center_mode is not None else ""
+        self.center_mode = "relative" if mode == "relative" else "absolute"
         self.set_dpi_awareness()
 
     @staticmethod
@@ -171,7 +185,7 @@ class MouseController:
             return
         abs_x = int(wx + min(max(x, 0), ww - 1))
         abs_y = int(wy + min(max(y, 0), wh - 1))
-        self.set_position_pixels(abs_x, abs_y)
+        self.center_at_pixels(abs_x, abs_y)
 
     def set_position_monitor_frac(self, monitor_index: int, fx: float, fy: float):
         """Move mouse to fraction of a specific monitor."""
@@ -186,7 +200,7 @@ class MouseController:
             h = mi.rcMonitor.bottom - y0
             abs_x = int(x0 + fx * w)
             abs_y = int(y0 + fy * h)
-            self.set_position_pixels(abs_x, abs_y)
+            self.center_at_pixels(abs_x, abs_y)
 
     def set_position_monitor_px(self, monitor_index: int, px: int, py: int):
         """Move mouse to absolute pixel offset inside a specific monitor."""
@@ -201,14 +215,15 @@ class MouseController:
             h = mi.rcMonitor.bottom - y0
             abs_x = int(x0 + min(max(px, 0), w - 1))
             abs_y = int(y0 + min(max(py, 0), h - 1))
-            self.set_position_pixels(abs_x, abs_y)
+            self.center_at_pixels(abs_x, abs_y)
 
 
     # --- Virtual desktop positioning ---
     def set_position_pixels(self, x: int, y: int):
         """Absolute move to desktop pixel coords."""
         user32.SetCursorPos(x, y)
-        self.log.debug(f"[MOUSE] Set position pixels: ({x},{y})")
+        if self.log:
+            self.log.debug(f"[MOUSE] Set position pixels: ({x},{y})")
 
     def set_position_frac(self, fx: float, fy: float):
         """Absolute move to fraction [0..1] of virtual desktop."""
@@ -218,7 +233,7 @@ class MouseController:
         h = user32.GetSystemMetrics(79)  # SM_CYVIRTUALSCREEN
         abs_x = int(x + fx * w)
         abs_y = int(y + fy * h)
-        self.set_position_pixels(abs_x, abs_y)
+        self.center_at_pixels(abs_x, abs_y)
 
     # --- Relative movement (VR safe) ---
     def move_relative(self, dx: int, dy: int):
@@ -227,6 +242,110 @@ class MouseController:
         inp.type = INPUT_MOUSE
         inp.mi = MOUSEINPUT(dx, dy, 0, MOUSEEVENTF_MOVE, 0, None)
         user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
+
+    # --- Centering (honours center_mode) ---
+    def center_at_pixels(self, x: int, y: int):
+        """Place the cursor at desktop pixel coords for a CenterMouse action.
+
+        Unlike set_position_pixels (a bare SetCursorPos, still used by the
+        absolute axis mode, wiggle and increments), this honours center_mode
+        so VR users can opt into a placement the game actually sees.
+        """
+        if self.center_mode != "relative":
+            self.set_position_pixels(x, y)
+        else:
+            self._center_relative(x, y)
+
+    def _read_cursor(self):
+        """Return the OS cursor position, once queued input has been applied.
+
+        SendInput returns as soon as the events are queued, not once they have
+        moved the cursor, so a GetCursorPos issued straight after a move still
+        reports the old position. The short sleep lets the input thread drain
+        the queue first. Both callers are edge-triggered (one placement per
+        button press), so this is not in a hot path.
+
+        Raises OSError if GetCursorPos fails - e.g. when this process is not
+        on the input desktop. That has to raise rather than be ignored: on
+        failure the POINT is left at (0, 0), and treating that as the cursor
+        position would inject a large bogus relative move.
+
+        No error code is included: user32 here is a plain ctypes.windll handle
+        (not use_last_error), so there is no code saved for us to read, and a
+        GetLastError() issued afterwards could report an unrelated error.
+        """
+        time.sleep(0.002)
+        pt = wt.POINT()
+        if not user32.GetCursorPos(ctypes.byref(pt)):
+            raise OSError("GetCursorPos failed")
+        return pt
+
+    def _center_relative(self, x: int, y: int):
+        """Place the cursor at (x, y) using only relative SendInput moves.
+
+        SetCursorPos warps the OS cursor without emitting any input event, so
+        a game that tracks its own cursor by integrating raw mouse deltas
+        never sees it. Here we instead:
+
+          1. Slam far toward the top-left, so both the OS cursor and the
+             delta-integrating consumer clamp at their respective origins.
+          2. Read where the OS cursor actually landed (that origin may be the
+             game window, if the game confines the cursor).
+          3. Send one delta from there to the target.
+
+        There is deliberately no correction loop: with Windows "Enhance
+        pointer precision" on, the applied delta is scaled non-linearly, and
+        driving the OS cursor onto the target with further corrections would
+        push the consumer's cursor further off. We warn instead.
+
+        Called from the main input loop, which has no exception handling, so
+        this must not raise; on failure we fall back to the absolute warp.
+        """
+        tx, ty = int(x), int(y)
+        try:
+            w = user32.GetSystemMetrics(78)  # SM_CXVIRTUALSCREEN
+            h = user32.GetSystemMetrics(79)  # SM_CYVIRTUALSCREEN
+
+            # 2x tolerates a consumer running at 0.5x sensitivity; the +200
+            # covers a degenerate metric. Chunked so no single event carries
+            # an implausibly large delta.
+            chunks = 4
+            dx_chunk = -(2 * int(w) + 200) // chunks
+            dy_chunk = -(2 * int(h) + 200) // chunks
+            for _ in range(chunks):
+                self.move_relative(dx_chunk, dy_chunk)
+
+            pt = self._read_cursor()
+            dx = tx - pt.x
+            dy = ty - pt.y
+            self.move_relative(dx, dy)
+
+            after = self._read_cursor()
+            err_x = tx - after.x
+            err_y = ty - after.y
+
+            if self.log:
+                self.log.debug(
+                    f"[MOUSE] Relative center: target=({tx},{ty}) "
+                    f"origin=({pt.x},{pt.y}) delta=({dx},{dy})"
+                )
+            if abs(err_x) > 2 or abs(err_y) > 2:
+                if self.log:
+                    self.log.warning(
+                        f"[MOUSE] Relative center landed off target: "
+                        f"target=({tx},{ty}) landed=({after.x},{after.y}); "
+                        f"likely causes are Windows 'Enhance pointer precision' "
+                        f"(pointer acceleration) being on, the pointer speed "
+                        f"slider not at its default middle notch, or the target "
+                        f"lying outside the screen or the game's cursor clip "
+                        f"rect - or set center_mode = absolute in [input]"
+                    )
+        except Exception as e:
+            if self.log:
+                self.log.warning(
+                    f"[MOUSE] Relative center failed ({e}); falling back to absolute"
+                )
+            self.set_position_pixels(tx, ty)
 
     # --- New helper: move along one axis ---
     def move_axis(self, axis: str, amount: int = 5):
@@ -269,7 +388,6 @@ class MouseController:
         user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
 
         # keep it pressed for hold_ms
-        import time
         time.sleep(hold_ms / 1000.0)
 
         # send UP
@@ -411,5 +529,5 @@ class MouseController:
             return
         abs_x = int(x + fx * w)
         abs_y = int(y + fy * h)
-        self.set_position_pixels(abs_x, abs_y)
+        self.center_at_pixels(abs_x, abs_y)
 
